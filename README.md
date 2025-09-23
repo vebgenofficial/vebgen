@@ -1,12 +1,12 @@
 # Vebgen AI Agent
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://github.com/vebgenofficial/vebgen/blob/main/LICENSE)
-[![CI Status](https://github.com/vebgenofficial/vebgen/actions/workflows/ci.yml/badge.svg)](https://github.com/vebgenofficial/vebgen/actions/workflows/ci.yml)
+
 [![Contributions Welcome](https://img.shields.io/badge/Contributions-welcome-brightgreen.svg?style=flat)](CONTRIBUTING.md)
 
 **Vebgen** is a sophisticated, AI-powered software engineering agent designed to autonomously plan and execute development tasks. Given a high-level prompt, it generates a detailed implementation plan, writes code, runs commands, and even attempts to debug its own errors, all within a secure, sandboxed desktop application.
 
-![Vebgen Application Demo](docs/assets/Vebgen%20Gif.gif)
+![Vebgen Application Demo](./docs/assets/VebGen%20Gif.gif)
 
 ---
 
@@ -54,7 +54,7 @@ Vebgen operates through a cyclical process of planning, execution, and self-corr
 
 ## Architecture Overview
 
-The application is built with a modular architecture to separate concerns. For a more detailed explanation of the architecture, please see the [Architecture Deep Dive](docs/ARCHITECTURE.md).
+The application is built with a modular architecture to separate concerns. For a more detailed explanation of the architecture, please see the [Architecture Deep Dive](docs/architecture.md).
 
 *   **UI (`backend/src/ui/`)**: The Tkinter-based graphical user interface. It communicates with the backend via a thread-safe queue to remain responsive.
 *   **Core (`backend/src/core/`)**: The heart of the application, containing the main logic for the agent.
@@ -148,15 +148,15 @@ pytest
 ## Documentation
 
 - [API Reference](docs/api/README.md)
-- [Architecture Deep Dive](docs/ARCHITECTURE.md)
+- [Architecture Deep Dive](docs/architecture.md)
 - Core Components
-  - [`WorkflowManager`](docs/core/workflow_manager.md)
-  - [`AgentManager`](docs/core/agent_manager.md)
-  - [`MemoryManager`](docs/core/memory_manager.md)
-  - [`ConfigManager`](docs/core/config_manager.md)
-  - [`FileSystemManager`](docs/core/file_system_manager.md)
-  - [`CommandExecutor`](docs/core/command_executor.md)
-  - [`RemediationManager`](docs/core/remediation_manager.md)
+  - [`WorkflowManager`](docs/api/core/workflow_manager.md)
+  - [`AgentManager`](docs/api/core/agent_manager.md)
+  - [`MemoryManager`](docs/api/core/memory_manager.md)
+  - [`ConfigManager`](docs/api/core/config_manager.md)
+  - [`FileSystemManager`](docs/api/core/file_system_manager.md)
+  - [`CommandExecutor`](docs/api/core/command_executor.md)
+  - [`RemediationManager`](docs/api/core/remediation_manager.md)
 - [Plugin System](docs/plugin_system.md)
 
 ## Contributing
