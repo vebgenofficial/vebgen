@@ -1,0 +1,11 @@
+
+{
+  "command_patterns": [
+    {
+      "blocked_pattern": "python -c \"import importlib;.*?\"",
+      "safe_alternative_template": "python -m py_compile {file_path}",
+      "description": "The command 'python -c' using 'importlib' for dynamic checks is blocked for security. A safe alternative is to use 'python -m py_compile' to validate the file's syntax.",
+      "param_extraction_regex": "importlib\\.import_module\\('([^']*)'\\)"
+    }
+  ]
+}

@@ -1,0 +1,59 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vebgen"
+version = "0.0.1"
+authors = [
+  { name="vebgenofficial", email="support@vebgen.com" },
+]
+description = "An AI-powered software engineering agent"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence"
+]
+dependencies = [
+    "anthropic",
+    "beautifulsoup4",
+    "customtkinter",
+    "diff-match-patch",
+    "google-generativeai",
+    "huggingface-hub",
+    "keyring",
+    "lxml",
+    "markdown-it-py",
+    "openai",
+    "Pillow",
+    "pydantic",
+    "python-patch",
+    "requests",
+    "unidiff",
+]
+
+[project.urls]
+"Homepage" = "https://github.com/vebgenofficial/vebgen"
+"Bug Tracker" = "https://github.com/vebgenofficial/vebgen/issues"
+
+[project.scripts]
+vebgen = "src.main:main"
+
+[project.optional-dependencies]
+django = ["Django"]
+dev = ["pytest", "black", "flake8"]
+
+[tool.setuptools]
+package-dir = {"" = "backend"}
+
+[tool.setuptools.packages.find]
+where = ["backend"]
+
+[tool.setuptools.package-data]
+"src" = ["plugins/django/*.py", "plugins/flask/*.py", "plugins/node/*.py", "plugins/react/*.py", "ui/assets/*", "core/providers.json", "core/command_blocklist.json"]
