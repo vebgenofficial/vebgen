@@ -16,6 +16,8 @@ class PatchGenerator:
         """
         if not isinstance(text, str):
             # Return an empty string for non-string inputs to avoid errors.
+            if text is not None:
+                text = str(text)
             return ""
         # Standardize all line endings (CRLF, CR) to LF for consistent processing.
         lines = text.replace('\r\n', '\n').replace('\r', '\n').split('\n')
@@ -30,28 +32,16 @@ class PatchGenerator:
         """
         Compares the original and new content and returns a patch string
         in the standard unified diff format.
-
-        Args:
-            original_content: The original content of the file as a string.
-            new_content: The new, corrected content of the file as a string.
-            file_path: The path to the file, used in the diff header.
-
-        Returns:
-            A string containing the patch in unified diff format, or an empty string
-            if there are no differences.
         """
         # First, normalize both original and new content to ensure a clean comparison.
         normalized_original = PatchGenerator._normalize_text_for_diff(original_content)
         normalized_new = PatchGenerator._normalize_text_for_diff(new_content)
 
-        # If there's no difference after normalization, no patch is needed.
         if normalized_original == normalized_new:
             return ""
 
-        # The unified diff format conventionally uses forward slashes in path headers.
         from_file = to_file = os.path.normpath(file_path).replace('\\', '/')
 
-        # Generate the diff using Python's built-in difflib library.
         diff = difflib.unified_diff(
             normalized_original.splitlines(keepends=True),
             normalized_new.splitlines(keepends=True),
@@ -59,5 +49,4 @@ class PatchGenerator:
             tofile=to_file,
         )
 
-        # The `unified_diff` returns a generator, so we join its lines into a single string.
         return "".join(diff)

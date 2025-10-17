@@ -3,6 +3,7 @@ import logging
 import google.generativeai as genai
 from typing import List, Optional
 
+import json
 # --- FIX: Import specific exceptions from the google-genai SDK ---
 try:
     from google.api_core import exceptions as google_exceptions
@@ -103,6 +104,14 @@ class GoogleGenAIClient:
 
         try:
             logger.info(f"Sending request to Google Gemini model '{self.model_id}'...")
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    # Use json.dumps for pretty printing the payload
+                    payload_str = json.dumps(gemini_messages, indent=2)
+                    logger.debug(f"Google GenAI Request Payload:\n{payload_str}")
+                except TypeError:
+                    logger.debug(f"Google GenAI Request Payload (non-serializable): {gemini_messages}")
+
             response = model_to_use.generate_content(
                 contents=gemini_messages,
                 generation_config=generation_config,
@@ -117,6 +126,8 @@ class GoogleGenAIClient:
 
             # Extract the text from the response and format it as a standard ChatMessage.
             assistant_message: ChatMessage = {"role": "assistant", "content": response.text.strip()}
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Google GenAI Response Content:\n{assistant_message['content']}")
             logger.info(f"Response received successfully from Gemini model {self.model_id}.")
             return assistant_message
 

@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vebgen"
-version = "0.0.1"
+version = "0.2.0"
 authors = [
-  { name="vebgenofficial", email="support@vebgen.com" },
+  { name="vebgenofficial", email="vebgenofficial@gmail.com" },
 ]
 description = "An AI-powered software engineering agent"
 readme = "README.md"
@@ -21,7 +21,6 @@ classifiers = [
     "Topic :: Scientific/Engineering :: Artificial Intelligence"
 ]
 dependencies = [
-    "anthropic",
     "beautifulsoup4",
     "customtkinter",
     "diff-match-patch",
@@ -32,10 +31,12 @@ dependencies = [
     "markdown-it-py",
     "openai",
     "Pillow",
+    "pygments",
     "pydantic",
     "python-patch",
+    "unidiff==0.7.5",
+    "rapidfuzz==3.6.2",
     "requests",
-    "unidiff",
 ]
 
 [project.urls]
@@ -43,11 +44,11 @@ dependencies = [
 "Bug Tracker" = "https://github.com/vebgenofficial/vebgen/issues"
 
 [project.scripts]
-vebgen = "src.main:main"
+vebgen = "main:main"
 
 [project.optional-dependencies]
 django = ["Django"]
-dev = ["pytest", "black", "flake8"]
+dev = ["pytest", "pytest-django", "pytest-asyncio", "black", "flake8", "djangorestframework", "anyio"]
 
 [tool.setuptools]
 package-dir = {"" = "backend"}
@@ -57,3 +58,10 @@ where = ["backend"]
 
 [tool.setuptools.package-data]
 "src" = ["plugins/django/*.py", "plugins/flask/*.py", "plugins/node/*.py", "plugins/react/*.py", "ui/assets/*", "core/providers.json", "core/command_blocklist.json"]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "src.core.test_settings"
+python_files = "test_*.py"
+pythonpath = ["backend"]
+asyncio_mode = "auto"
+markers = ["asyncio"]

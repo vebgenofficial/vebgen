@@ -4,7 +4,7 @@ import keyring # Needs: pip install keyring
 # Consider installing a backend if needed (e.g., pip install keyrings.cryptfile)
 # See keyring documentation for backend setup: https://pypi.org/project/keyring/
 import platform
-from typing import Optional # Keep Optional import
+from typing import Optional
 
 logger = logging.getLogger(__name__)
 
@@ -12,6 +12,10 @@ logger = logging.getLogger(__name__)
 # This prevents Vebgen's stored keys from conflicting with other applications
 # on the user's system that might also be using the keyring library.
 SERVICE_NAME = "VebgenAI_Agents"
+
+# Import specific exceptions to avoid issues with mocking the keyring module in tests.
+from keyring.errors import KeyringError, PasswordDeleteError
+
 
 def store_credential(key: str, secret: str) -> None:
     """
@@ -44,7 +48,7 @@ def store_credential(key: str, secret: str) -> None:
         # Use keyring to set the password (secret) for the given service and key.
         keyring.set_password(SERVICE_NAME, key, secret_stripped)
         logger.info(f"Stored credential for key '{key}' securely.")
-    except keyring.errors.KeyringError as e:
+    except KeyringError as e:
         # This error typically means the keyring backend is not installed or configured.
         # We raise a RuntimeError because the app cannot function without secure storage.
         logger.exception(f"Failed to store credential securely for key '{key}'. Keyring backend might be misconfigured or unavailable.")
@@ -89,7 +93,7 @@ def retrieve_credential(key: str) -> Optional[str]:
             # This is a normal, expected case if the user hasn't entered the key yet.
             logger.debug(f"No credential found for key '{key}' in secure storage.")
             return None
-    except keyring.errors.KeyringError as e:
+    except KeyringError as e:
         # Don't raise an exception here. Not finding a key is an expected state
         # that the application handles by prompting the user. We just log the warning.
         logger.warning(f"Failed to retrieve credential securely for key '{key}'. Keyring backend might be misconfigured or unavailable.", exc_info=False) # Don't need full trace usually
@@ -122,12 +126,12 @@ def delete_credential(key: str) -> bool:
         keyring.delete_password(SERVICE_NAME, key)
         logger.info(f"Deleted credential for key '{key}' from secure storage (or it didn't exist).")
         return True
-    except keyring.errors.PasswordDeleteError:
+    except PasswordDeleteError:
         # This specific error means the password wasn't found, which is fine for a delete operation.
         # We can consider the goal (the key being gone) achieved.
         logger.warning(f"Credential for key '{key}' not found during deletion attempt (or backend doesn't support delete). Treating as success.")
         return True # Treat as success in terms of the key being gone
-    except keyring.errors.KeyringError as e:
+    except KeyringError as e:
         # This indicates a more serious problem with the storage backend itself.
         logger.error(f"Failed to delete credential securely for key '{key}'. Keyring backend error.", exc_info=True)
         return False # Indicate failure
@@ -153,37 +157,27 @@ def check_keyring_backend():
         # Define a unique key for testing that's unlikely to clash.
         test_key = "vebgen_keyring_test_credential"
         test_pw = "dummy_password_123!_for_test"
-        retrieved = None # Initialize retrieved
-        deleted = False # Initialize deleted
 
-        # Perform the test operations within a try block for cleaner error handling.
-        try: # Perform a quick set, get, and delete operation to test functionality.
+        try:
+            # Perform a quick set, get, and delete operation to test functionality.
             store_credential(test_key, test_pw)
-            retrieved = retrieve_credential(test_key)
-            deleted = delete_credential(test_key) # Use the delete function
-        except (RuntimeError, ValueError) as cred_op_error:
-            # Catch errors specifically from our credential functions.
-            logger.error(f"Keyring backend test failed during credential operation: {cred_op_error}")
-            # Attempt cleanup even if test failed during storage/retrieval
-            try:
-                delete_credential(test_key)
-            except Exception:
-                logger.warning("Failed to clean up test credential after operation error.")
-            return False
+            retrieved = retrieve_credential(test_key) # type: ignore
 
-        # Verify that the value we got back is the one we stored, and that deletion succeeded.
-        if retrieved == test_pw and deleted:
-            logger.info("Keyring backend test successful (set/get/delete).")
+            # Verify that the value we got back is the one we stored.
+            if retrieved != test_pw:
+                logger.error(f"Keyring backend test failed: Retrieved password ('{retrieved}') did not match expected.")
+                return False
+
+            logger.info("Keyring backend test successful (set/get).")
             return True
-        else:
-            logger.error(f"Keyring backend test failed: Retrieved password ('{retrieved}') did not match expected or deletion failed (Deleted: {deleted}).")
-            # Attempt cleanup again if deletion failed during the test sequence.
-            if not deleted:
-                try:
-                    delete_credential(test_key)
-                except Exception:
-                    logger.warning("Failed to clean up test credential after failed test verification.")
+        except (RuntimeError, ValueError, KeyringError) as cred_op_error:
+            logger.error(f"Keyring backend test failed during set/get operation: {cred_op_error}")
             return False
+        finally:
+            # Always attempt to clean up the test credential.
+            logger.debug("Running keyring backend test cleanup.")
+            if not delete_credential(test_key):
+                logger.warning("Failed to clean up test credential after backend check. Manual removal may be needed.")
 
     except Exception as e:
         # This block catches errors if keyring itself fails to initialize.

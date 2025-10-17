@@ -156,6 +156,10 @@ class LlmClient:
             start_time = time.time()
 
             try:
+                # --- FIX: Update last_api_call_time BEFORE the request ---
+                # This ensures that even if the call fails, the rate limiter knows an attempt was made.
+                self.last_api_call_time = start_time
+
                 # Prepare headers for this specific request, including the API key.
                 # --- FIX: Build headers fresh to avoid stale session data ---
                 request_headers = {
@@ -226,7 +230,8 @@ class LlmClient:
                             continue
 
                         # Successfully extracted the message, return it to exit the loop.
-                        return message_data
+                        message_data['content'] = message_data.get('content', '').strip()
+                        return message_data # type: ignore
                         # --- END FIX ---
 
                     except json.JSONDecodeError as e: # Handle cases where the 200 OK response is not valid JSON.
@@ -281,14 +286,17 @@ class LlmClient:
                 time.sleep(jitter_wait_time)
             elif should_retry and attempt >= self.max_retries - 1:
                 logger.error(f"Max retries ({self.max_retries}) reached for {self.model}.")
-                if last_exception: raise last_exception # Re-raise the last captured exception
+                # --- FIX: Re-raise the last specific exception for better error reporting ---
+                if last_exception:
+                    raise last_exception
                 else: raise RuntimeError(f"Max retries reached for {self.model}, but no specific exception recorded.")
 
         # This block should not be reached with the current logic but serves as a final safeguard.
         final_error_message = f"Failed to get valid response from {self.model} after {self.max_retries} attempts (unexpected loop exit)."
+        # --- FIX: Always raise the most specific error available ---
         if last_exception:
             logger.error(f"{final_error_message} Last error: {last_exception}")
-            raise RuntimeError(final_error_message) from last_exception
+            raise last_exception
         else:
             logger.error(final_error_message + " No specific exception recorded.")
             raise RuntimeError(final_error_message)

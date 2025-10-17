@@ -1,5 +1,6 @@
 # src/core/anthropic_client.py
 import logging
+import json
 from typing import List, Optional
 
 try:
@@ -75,6 +76,13 @@ class AnthropicClient:
 
         try:
             logger.info(f"Sending request to Anthropic model '{self.model_id}'...")
+            if logger.isEnabledFor(logging.DEBUG):
+                try:
+                    payload_str = json.dumps(valid_messages, indent=2)
+                    logger.debug(f"Anthropic Request Payload:\n{payload_str}")
+                except TypeError:
+                    logger.debug(f"Anthropic Request Payload (non-serializable): {valid_messages}")
+
             # Call the chat completion endpoint using the configured client.
             response = self.client.chat.completions.create(
                 model=self.model_id,
@@ -86,6 +94,9 @@ class AnthropicClient:
             # Ensure the response contains choices before trying to access them.
             if not response.choices:
                 raise RuntimeError("Anthropic response contained no choices.")
+
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Anthropic Response Content:\n{response.choices[0].message.content}")
 
             # Extract the message content from the first choice.
             assistant_message_obj = response.choices[0].message

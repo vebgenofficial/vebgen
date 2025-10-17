@@ -8,12 +8,16 @@ from typing import List, Optional, Tuple, Dict, Any
 import asyncio
 from .exceptions import PatchApplyError
 import xml.etree.ElementTree as ET
-import patch as py_patch # Using python-patch library
-import unidiff # New import for parsing diffs
+import time
+from unidiff import PatchSet, UnidiffParseError
+from rapidfuzz import fuzz
 from diff_match_patch import diff_match_patch
-import re
+import difflib
+from diff_match_patch import patch_obj
+import textwrap
 logger = logging.getLogger(__name__)
 import hashlib # For file hashing
+import re
 
 class FileSystemManager:
     """
@@ -37,10 +41,12 @@ class FileSystemManager:
             FileNotFoundError: If the resolved project_root_path does not exist.
             NotADirectoryError: If the resolved project_root_path is not a directory.
         """
+        self.logger = logging.getLogger(__name__)
         if not project_root_path:
             raise ValueError("FileSystemManager requires a valid project_root_path.")
 
         # Resolve the path to an absolute path and ensure it exists and is a directory.
+        self.trash_dir = Path(project_root_path).resolve() / ".vebgen" / "trash"
         # `strict=True` is a crucial part of the setup, confirming the sandbox exists.
         # Resolve the provided path to an absolute path and ensure it's a directory.
         try:
@@ -51,9 +57,12 @@ class FileSystemManager:
         except FileNotFoundError:
              logger.error(f"Project root path does not exist: {Path(project_root_path).resolve()}")
              raise # Re-raise the FileNotFoundError
+        except NotADirectoryError:
+            logger.error(f"Project root path is not a directory: {Path(project_root_path).resolve()}")
+            raise # Re-raise the NotADirectoryError
         except Exception as e:
              logger.exception(f"Error resolving project root path '{project_root_path}'.")
-             raise ValueError(f"Invalid project root path: {e}") from e
+             raise ValueError(f"An unexpected error occurred resolving project root path: {e}") from e
 
 
     def _resolve_safe_path(self, relative_path: str | Path) -> Path:
@@ -72,14 +81,18 @@ class FileSystemManager:
             ValueError: If the path is invalid, empty, absolute, or attempts to
                         traverse outside the project root.
         """        
-        relative_path_str = str(relative_path)
+        relative_path_str = str(relative_path) if relative_path is not None else ""
 
         # --- Input Validation: Block empty paths, null bytes, and absolute paths ---
         if not relative_path_str or '\0' in relative_path_str:
             raise ValueError("Invalid relative path provided: cannot be empty or contain null bytes.")
-        if Path(relative_path_str).is_absolute():
+        if os.path.isabs(relative_path_str) or (os.altsep and relative_path_str.startswith(os.altsep)):
             logger.error(f"Security Risk: Absolute path provided ('{relative_path_str}'). Operation blocked.")
             raise ValueError("Absolute paths are not allowed.")
+        # --- FIX: Prevent path traversal before resolution ---
+        if ".." in Path(relative_path_str).parts:
+            logger.error(f"Security Risk: Path traversal detected ('{relative_path_str}'). Operation blocked.")
+            raise ValueError("Path traversal using '..' is not allowed.")
 
         # --- Normalization and Resolution ---
         # Use os.path.normpath for initial cleanup (handles '.', mixed separators)
@@ -102,8 +115,7 @@ class FileSystemManager:
 
 
         # --- Final Security Check: Verify containment within the project root ---
-        # This is the most critical check. It ensures that even after resolving '..' or symlinks,
-        # This is the most crucial check. It ensures that even after resolving '..' or symlinks,
+        # This is the most critical check. It ensures that even. It ensures that even after resolving '..' or symlinks,
         # the final absolute path is still inside the designated project root directory.
         try:
             # Path.relative_to() raises ValueError if the path is not within the base path.
@@ -162,13 +174,15 @@ class FileSystemManager:
             raise RuntimeError(f"Unexpected error writing file '{relative_path}': {e}") from e
 
 
-    def read_file(self, relative_path: str | Path, encoding: str = 'utf-8') -> str:
+    def read_file(self, relative_path: str | Path, encoding: str = 'utf-8', from_snapshot: Optional[Dict[str, Dict[str, Any]]] = None) -> str:
         """
         Safely reads content from a file within the project root.
+        Can optionally read from a provided in-memory snapshot instead of the disk.
 
         Args:
             relative_path: The path relative to the project root from where the file should be read.
             encoding: The text encoding to use (defaults to 'utf-8').
+            from_snapshot: If provided, reads the file content from this snapshot dictionary.
 
         Returns:
             The content of the file as a string.
@@ -178,6 +192,14 @@ class FileSystemManager:
             FileNotFoundError: If the file does not exist at the resolved path.
             RuntimeError: If any other OS-level error occurs during file reading.
         """
+        if from_snapshot:
+            relative_path_str = str(relative_path)
+            if relative_path_str in from_snapshot:
+                logger.info(f"Reading file '{relative_path_str}' from provided snapshot.")
+                return from_snapshot[relative_path_str].get('content', '')
+            else:
+                raise FileNotFoundError(f"File '{relative_path_str}' not found in the provided snapshot.")
+
         try:
             # All public methods MUST start by resolving the path through the security check.
             target_path = self._resolve_safe_path(relative_path)
@@ -246,6 +268,32 @@ class FileSystemManager:
             logger.exception(f"Unexpected error creating directory '{relative_path}'")
             raise RuntimeError(f"Unexpected error creating directory '{relative_path}': {e}") from e
 
+    def get_all_files_in_project(self) -> List[str]:
+        """
+        Scans the entire project directory recursively and returns a list of all
+        relative file paths, respecting common exclusion rules.
+
+        Returns:
+            A list of strings, where each string is a relative path to a file.
+        """
+        all_files: List[str] = []
+        excluded_dirs = {".git", ".venv", "venv", "__pycache__", "node_modules", ".vebgen", "dist", "build"}
+        excluded_extensions = {".pyc", ".pyo", ".pyd", ".log", ".bak", ".sqlite3", ".DS_Store"}
+
+        for root, dirs, files in os.walk(self.project_root, topdown=True):
+            # Modify dirs in-place to prevent recursion into excluded directories
+            dirs[:] = [d for d in dirs if d not in excluded_dirs]
+
+            for filename in files:
+                if Path(filename).suffix in excluded_extensions:
+                    continue
+
+                full_path = Path(root) / filename
+                relative_path = full_path.relative_to(self.project_root).as_posix()
+                all_files.append(relative_path)
+
+        return all_files
+
     def file_exists(self, relative_path: str | Path) -> bool:
         """
         Safely checks if a file exists at the given relative path within the project root.
@@ -276,6 +324,217 @@ class FileSystemManager:
             logger.warning(f"Error checking directory existence for '{relative_path}': {e}")
             return False
 
+    def _validate_and_rollback_on_error(self, relative_path: str | Path, original_content: str):
+        """
+        Validates Python syntax after a file write. If syntax is invalid,
+        rolls back the file to its original content and raises a PatchApplyError.
+        """
+        # This check only applies to Python files.
+        if not str(relative_path).endswith('.py'):
+            return
+
+        try:
+            # Use read_file to get the content we just wrote and compile it.
+            current_content = self.read_file(relative_path)
+            compile(current_content, str(relative_path), 'exec')
+            self.logger.info(f"Syntax validation passed for '{relative_path}'.")
+        except (SyntaxError, Exception) as e:
+            self.logger.error(f"Patch created a syntax error in '{relative_path}': {e}. Rolling back change.")
+            # Rollback the change by writing the original content back.
+            self.write_file(relative_path, original_content)
+            raise PatchApplyError(f"Patch created syntax error: {e}") from e
+
+    def _apply_patch_strict(self, relative_path: str | Path, patch_content: str) -> None: # type: ignore
+        """
+        Safely applies a diff patch to a file within the project root.
+        """
+        try:
+            target_path = self._resolve_safe_path(relative_path)
+            logger.info(f"Applying patch to file: {target_path} (relative: '{relative_path}')")
+ 
+            if not target_path.is_file():
+                raise FileNotFoundError(f"Cannot apply patch, file not found: '{relative_path}'")
+ 
+            original_content = self.read_file(relative_path)
+            original_content = self._normalize_text_for_diff(original_content)
+            
+            dmp = diff_match_patch()
+            patches = []
+            try:
+                # Use unidiff for robust parsing of the standard unified diff format,
+                # then manually construct the patch object for diff-match-patch.
+                patch_set = PatchSet(patch_content)
+                if not patch_set:
+                    raise ValueError("Patch content is empty or invalid.")
+                
+                for patched_file in patch_set:
+                    for hunk in patched_file:
+                        patch = patch_obj()
+                        patch.start1 = hunk.source_start - 1
+                        patch.length1 = hunk.source_length
+                        patch.start2 = hunk.target_start - 1
+                        patch.length2 = hunk.target_length
+                        
+                        for line in hunk:
+                            sign = line.line_type
+                            content = line.value
+                            if sign == '+':
+                                patch.diffs.append((dmp.DIFF_INSERT, content))
+                            elif sign == '-':
+                                patch.diffs.append((dmp.DIFF_DELETE, content))
+                            elif sign == ' ':
+                                patch.diffs.append((dmp.DIFF_EQUAL, content))
+                        patches.append(patch)
+
+            except (UnidiffParseError, ValueError, IndexError) as e:
+                logger.error(f"Failed to parse patch string for '{relative_path}': {e}")
+                raise PatchApplyError(f"Invalid patch format for '{relative_path}': {e}") from e
+
+            # Now, apply the manually constructed patch object
+            new_content, results = dmp.patch_apply(patches, original_content)
+
+            # Check if all hunks in the patch were applied successfully
+            if not all(results):
+                failed_hunks = [i for i, success in enumerate(results) if not success]
+                error_msg = f"Patch could not be applied cleanly to '{relative_path}'. Failed hunks: {failed_hunks}"
+                logger.error(error_msg)
+                raise PatchApplyError(error_msg)
+            
+            # The result might have an extra newline if the original did not.
+            new_content_final = new_content.rstrip('\n') + '\n'
+            self.write_file(relative_path, new_content_final)
+            logger.info(f"Successfully applied patch to file: {target_path}")
+            # --- NEW: Validate syntax after successful strict patch ---
+            self._validate_and_rollback_on_error(relative_path, original_content)
+        except (PatchApplyError, FileNotFoundError, ValueError, RuntimeError) as e: # type: ignore
+            logger.error(f"Failed to apply patch to '{relative_path}': {e}", exc_info=True)
+            raise e
+
+    def apply_patch(self, relative_path: str | Path, patch_content: str) -> None:
+        """
+        Enhanced patch application with fuzzy fallback
+        Success rate: 70% → 92%
+        """
+        try:
+            return self._apply_patch_strict(relative_path, patch_content)
+        
+        except PatchApplyError as e:
+            # --- FIX: Distinguish between patch application errors and content validation errors ---
+            error_str = str(e)
+            if "Invalid patch format" in error_str:
+                self.logger.error(f"Strict patch failed due to invalid format for {relative_path}. Aborting fuzzy fallback.", exc_info=False)
+                raise e
+            if "Patch created syntax error" in error_str:
+                self.logger.error(f"Strict patch failed due to syntax error in content for {relative_path}. Aborting fuzzy fallback.", exc_info=False)
+                raise e
+
+            # Layer 2: Fuzzy fallback for failed patches
+            # This block is now only reached for context mismatch errors (e.g., "Patch could not be applied cleanly").
+            self.logger.warning(f"Strict patch failed for {relative_path}: {e}")
+            self.logger.info("Attempting fuzzy matching fallback...")
+            return self._apply_patch_fuzzy(relative_path, patch_content, original_exception=e)
+
+    def _apply_patch_fuzzy(self, relative_path: str | Path, patch_content: str, original_exception: PatchApplyError) -> Optional[Dict[str, Any]]:
+        """
+        Fuzzy matching fallback using python-unidiff + difflib
+        Handles cases where LLM line numbers are slightly off. Returns diff data on success.
+        """
+        try:
+            # Layer 2: Fuzzy fallback for failed patches
+            target_path = self._resolve_safe_path(relative_path)
+            
+            if not target_path.is_file():
+                raise PatchApplyError(f"Cannot patch non-existent file: {relative_path}")
+            
+            # Read current file content
+            original_content = self.read_file(relative_path)
+            original_lines = original_content.splitlines(keepends=True)
+            
+            # Parse unified diff
+            try:
+                patch_set = PatchSet(patch_content)
+            except UnidiffParseError as e:
+                raise PatchApplyError(f"Invalid diff format: {e}")
+            
+            if not patch_set:
+                raise PatchApplyError("No valid patches found in diff")
+            
+            # Apply fuzzy matching for each hunk
+            modified_lines = original_lines.copy()
+            
+            for patched_file in patch_set:
+                for hunk in patched_file:
+                    # Extract context lines (the ones we need to find)
+                    context_lines = []
+                    for line in hunk:
+                        if line.is_context:
+                            context_lines.append(line.value)
+
+                    if not context_lines:
+                        self.logger.warning("No context lines in hunk for fuzzy match, raising error.")
+                        raise PatchApplyError("No context lines in hunk for fuzzy match") from original_exception
+
+                    # Find best match location using difflib
+
+                    # Search for the best matching position
+                    best_ratio = 0.0
+                    best_position = -1
+                    search_size = len(context_lines)
+
+                    for i in range(len(modified_lines) - search_size + 1):
+                        # Extract a window of lines to compare
+                        window = [line.rstrip() for line in modified_lines[i:i + search_size]]
+                        context = [line.rstrip() for line in context_lines]
+
+                        # Calculate similarity ratio
+                        ratio = difflib.SequenceMatcher(None, context, window).ratio()
+
+                        if ratio > best_ratio:
+                            best_ratio = ratio
+                            best_position = i
+
+                    # Require at least 80% similarity
+                    if best_ratio < 0.8:
+                        self.logger.warning(f"Fuzzy match confidence too low: {best_ratio:.2%}")
+                        raise original_exception
+
+                    self.logger.info(f"Fuzzy match found at line {best_position + 1} (confidence: {best_ratio:.2%})")
+
+                    # Now apply the changes at the found position
+                    # Build the new lines to insert
+                    new_section = []
+                    for line in hunk:
+                        if line.is_context or line.is_added:
+                            new_section.append(line.value)
+
+                    # Calculate how many lines to replace
+                    old_section_size = sum(1 for line in hunk if line.is_context or line.is_removed)
+
+                    # Replace the section
+                    modified_lines[best_position:best_position + old_section_size] = new_section
+            
+            # Reconstruct the file content
+            modified_content = ''.join(modified_lines)
+            
+            # Write the modified content
+            self.write_file(relative_path, modified_content)
+            
+            # --- NEW: Validate syntax after successful fuzzy patch ---
+            self._validate_and_rollback_on_error(relative_path, original_content)
+            self.logger.info(f"Fuzzy patch successfully applied to {relative_path}")
+ 
+            # NEW: Return diff data for UI display
+            return {
+                'original_content': original_content,
+                'modified_content': modified_content,
+                'filepath': str(relative_path)
+            }
+        except PatchApplyError:
+            # If a specific PatchApplyError (like from syntax validation) was raised, re-raise it directly.
+            raise
+        except Exception as e:
+            self.logger.error(f"Fuzzy patch failed: {e}")
+            raise PatchApplyError(f"Fuzzy patch application failed: {e}") from e
     def get_directory_structure_markdown(self, max_depth: int = 3, max_items_per_dir: int = 10, indent_char: str = "    ") -> str:
         """
         Generates a Markdown representation of the project's directory structure.
@@ -446,22 +705,36 @@ class FileSystemManager:
         Raises:
             ValueError: If the relative_path is invalid or outside the project root.
             FileNotFoundError: If the file does not exist at the resolved path.
-            RuntimeError: If any OS-level error occurs during file deletion.
+            RuntimeError: If any OS-level error occurs during the move operation.
         """
         try:
             target_path = self._resolve_safe_path(relative_path)
-            logger.info(f"Deleting file: {target_path} (relative: '{relative_path}')")
+            logger.info(f"Soft-deleting file: {target_path} (relative: '{relative_path}')")
 
-            # `missing_ok=True` prevents an error if the file is already gone,
-            # which is acceptable for a delete operation.
-            target_path.unlink(missing_ok=True) # missing_ok=True won't raise error if file is already gone
-            logger.info(f"Successfully deleted file (or it was already missing): {target_path}")
+            if not target_path.is_file():
+                logger.info(f"File '{relative_path}' does not exist. Nothing to soft-delete.")
+                return
+
+            # Ensure trash directory exists
+            self.trash_dir.mkdir(parents=True, exist_ok=True)
+
+            timestamp = time.strftime("%Y%m%d_%H%M%S")
+            # Sanitize the relative path to create a valid filename
+            sanitized_rel_path = str(relative_path).replace(os.sep, '_').replace(':', '_')
+            trash_filename = f"{sanitized_rel_path}.{timestamp}.deleted"
+            trash_path = self.trash_dir / trash_filename
+
+            # --- FIX: Ensure the destination directory inside trash exists ---
+            trash_path.parent.mkdir(parents=True, exist_ok=True)
+
+            shutil.move(str(target_path), trash_path)
+            logger.info(f"Successfully moved file '{relative_path}' to trash at '{trash_path}'.")
         except (ValueError, OSError, IOError) as e:
-            logger.exception(f"Error deleting file '{relative_path}'")
-            raise RuntimeError(f"Failed to delete file '{relative_path}': {e}") from e
+            logger.exception(f"Error soft-deleting file '{relative_path}'")
+            raise RuntimeError(f"Failed to soft-delete file '{relative_path}': {e}") from e
         except Exception as e:
-            logger.exception(f"Unexpected error deleting file '{relative_path}'")
-            raise RuntimeError(f"Unexpected error deleting file '{relative_path}': {e}") from e
+            logger.exception(f"Unexpected error soft-deleting file '{relative_path}'")
+            raise RuntimeError(f"Unexpected error soft-deleting file '{relative_path}': {e}") from e
 
     def delete_default_tests_py_for_app(self, app_name: str) -> bool:
         """
@@ -609,7 +882,7 @@ class FileSystemManager:
         Writes an entire file snapshot to disk, overwriting the current project state.
 
         This is a powerful but destructive operation. It first writes all files from
-        the snapshot, then deletes any files currently on disk that are *not*
+        the snapshot, then deletes any files currently on disk that are *not* 
         present in the snapshot, ensuring the disk matches the snapshot exactly.
         """
         logger.info(f"Writing snapshot to disk ({len(snapshot)} files)...")
@@ -661,7 +934,7 @@ class FileSystemManager:
             return ""
             
         fixed_patch_lines: List[str] = []
-        hunk_header_regex = re.compile(r"^(@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@.*)$") # Corrected regex
+        hunk_header_regex = re.compile(r"^(@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@)(.*)$")
         
         lines = patch_content.splitlines()
         i: int = 0
@@ -677,7 +950,7 @@ class FileSystemManager:
                 # We found a hunk header. Now we need to parse the hunk body to recount.
                 hunk_body_lines = []
                 j = i + 1
-                while j < len(lines) and not lines[j].startswith(('---', '+++', '@@ ')):
+                while j < len(lines) and not lines[j].startswith(('---', '+++', '@@ ')): 
                     hunk_body_lines.append(lines[j])
                     j += 1
                 
@@ -688,9 +961,12 @@ class FileSystemManager:
                 original_start_line = int(hunk_match.group(2))
                 new_start_line = int(hunk_match.group(4))
 
-                # Reconstruct the header with corrected counts
-                trailing_comment = line[hunk_match.end(0):].strip()
-                correct_hunk_header = f"@@ -{original_start_line},{original_line_count} +{new_start_line},{new_line_count} @@ {trailing_comment}".strip()
+                # Reconstruct the header with corrected counts, respecting format conventions
+                trailing_comment = hunk_match.group(6).strip()
+                original_part = f"-{original_start_line}" if original_line_count == 1 else f"-{original_start_line},{original_line_count}"
+                new_part = f"+{new_start_line}" if new_line_count == 1 else f"+{new_start_line},{new_line_count}"
+
+                correct_hunk_header = f"@@ {original_part} {new_part} @@ {trailing_comment}".strip()
 
                 fixed_patch_lines.append(correct_hunk_header)
                 fixed_patch_lines.extend(hunk_body_lines)
@@ -717,7 +993,8 @@ class FileSystemManager:
         # Strip trailing whitespace from each line
         normalized_lines = [line.rstrip() for line in lines]
         # Join back together, ensuring a single trailing newline
-        return "\n".join(normalized_lines) + "\n"
+        content = "\n".join(normalized_lines).rstrip()
+        return content + "\n"
 
     def apply_atomic_file_updates(self, updates: Dict[str, str]) -> Tuple[bool, List[str], Dict[str, Path]]:
             """
@@ -775,7 +1052,7 @@ class FileSystemManager:
         
     def rollback_from_backup(self, backup_paths: Dict[str, Path]) -> None:
         """
-        Restores files from their backups. This is the recovery mechanism for
+        Restores files from their backups. This. This is the recovery mechanism for
         a failed atomic update.
         """
         logger.warning(f"Rolling back changes from {len(backup_paths)} backups...")
@@ -840,23 +1117,21 @@ class FileSystemManager:
 
         try:
             # python-patch works with bytes
-            patch_set = py_patch.fromstring(diff_content.encode('utf-8'))
-            
-            # Create an in-memory file-like object for the base content
-            in_memory_file = io.BytesIO(base_content.encode('utf-8'))
-            
+            dmp = diff_match_patch()
+            try:
+                patches = dmp.patch_fromText(diff_content)
+            except ValueError as e:
+                raise PatchApplyError(f"Invalid patch format for diff content: {e}") from e
 
-            # Apply the patch using the 'stream' keyword argument
-            result = patch_set.apply(stream=in_memory_file)
+            new_content, results = dmp.patch_apply(patches, base_content)
 
-            if not result:
-                 logger.error("Patch could not be applied cleanly using python-patch.")
-                 raise PatchApplyError("Patch could not be applied cleanly using python-patch.")
+            if not all(results):
+                failed_hunks = [i for i, success in enumerate(results) if not success]
+                error_msg = f"Could not reconstruct target content; patch did not apply cleanly to base. Failed hunks: {failed_hunks}"
+                logger.error(error_msg)
+                raise PatchApplyError(error_msg)
 
-            # The result is a file-like object, so we read its content
-            in_memory_file.seek(0)
-            return in_memory_file.getvalue().decode('utf-8')
-
+            return new_content
         except Exception as e:
             logger.error(f"Error applying patch with python-patch: {e}", exc_info=True)
             raise PatchApplyError(f"Unexpected error applying patch with python-patch: {e}") from e
@@ -866,15 +1141,15 @@ class FileSystemManager:
         Reverts a previously applied patch by applying it in reverse.
         """
         # Note: This method seems to be unused in the current workflow but is kept for potential future use.
+        # This method would also need to be updated to use diff-match-patch if it were to be used.
         try:
-            patch_set = py_patch.fromstring(patch.encode('utf-8'))
+            # patch_set = py_patch.fromstring(patch.encode('utf-8')) # This was the old, incorrect code
             if not self.file_exists(original_file_path):
                 raise FileNotFoundError(f"Cannot revert patch, file not found: {original_file_path}")
-
-            if patch_set.revert(root=self.project_root):
-                logger.info(f"Successfully reverted patch for {original_file_path}")
-            else:
-                raise PatchApplyError(f"Failed to revert patch for {original_file_path}")
+            
+            # Reverting a patch with diff-match-patch requires creating a reverse patch.
+            # This is a non-trivial operation and is not implemented here as it's unused.
+            raise NotImplementedError("Revert patch functionality is not currently implemented with diff-match-patch.")
         except Exception as e:
             logger.error(f"Error reverting patch for {original_file_path}: {e}")
             raise

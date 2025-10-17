@@ -4,6 +4,7 @@ from typing import Optional, Callable, Dict, Tuple, Union, Awaitable, List, Lite
 import re 
 import asyncio
 import json
+import time
 # Import required components
 from .llm_client import LlmClient, ChatMessage, RateLimitError, AuthenticationError
 from .hf_client import HuggingFaceClient # <-- Import the new client
@@ -23,13 +24,12 @@ RequestApiKeyUpdateCallable = Callable[[str, str, str], Awaitable[Tuple[Optional
 
 class AgentManager:
     """
-    Manages the lifecycle of a single, dynamically configured LLM client.
+    Manages the lifecycle of a single, dynamically configured LLM client instance.
 
     This class acts as a central point for creating, configuring, and re-initializing
     the specific LLM client (like OpenAI, Google, etc.) that the application will use.
     It handles the complexities of API key management by interacting with secure
     storage and prompting the user for keys when necessary via UI callbacks.
-    Accepts a provider and model ID dynamically and allows re-initialization.
     """
     def __init__(self,
                  provider_id: str,
@@ -45,15 +45,12 @@ class AgentManager:
 
         Args:
             provider_id: The ID of the API provider (e.g., "google", "openai").
-            model_id: The model ID to use.
+            model_id: The specific model ID to use for the selected provider.
             config_manager: The application's ConfigManager instance.
             show_input_prompt_cb: Callback to prompt user for initial API key input.
             request_api_key_update_cb: Callback to prompt user to update API key after an error.
             site_url: Optional URL of the referring site, used for OpenRouter ranking.
             site_title: Optional title of the referring site, used for OpenRouter ranking.
-
-        Raises:
-            ValueError: If model IDs are missing or invalid.
         """
         logger.info(f"Initializing AgentManager for provider '{provider_id}' and model '{model_id}'...")
         if not provider_id or not model_id:
@@ -76,11 +73,11 @@ class AgentManager:
 
     def _get_client_class(self, class_name: str) -> Type[Union[LlmClient, HuggingFaceClient, GoogleGenAIClient, OpenAIClient, AnthropicClient]]:
         """
-        Dynamically retrieves the client class from a factory dictionary.
+        Dynamically retrieves a client class type from a factory dictionary.
 
         This approach avoids a large if/elif/else block and makes it easy to add
-        new client types. It also helps with testing by allowing these classes to be mocked.
-        This helper ensures that patched mocks are correctly retrieved during tests.
+        new client types. It also helps with testing by allowing these classes to be
+        mocked individually.
         """
         client_classes: Dict[str, Type[Union[LlmClient, HuggingFaceClient, GoogleGenAIClient, OpenAIClient, AnthropicClient]]] = {
             "LlmClient": LlmClient,
@@ -97,12 +94,12 @@ class AgentManager:
 
     def _initialize_agent(self):
         """
-        Loads the API key and initializes the appropriate LLM client.
-        Uses the currently set provider_id and model_id.
+        Loads the required API key and initializes the appropriate LLM client based
+        on the currently configured provider and model.
 
         Raises:
-            ValueError: If API keys are missing and cannot be prompted for.
-            RuntimeError: If LlmClient instantiation fails.
+            ValueError: If the configuration is invalid or the user cancels an API key prompt.
+            RuntimeError: If the client class fails to instantiate.
         """
         logger.debug(f"Attempting to load key and initialize agent for provider '{self.provider_id}'...")
         # Reset the agent to ensure a clean state before initialization
@@ -124,8 +121,8 @@ class AgentManager:
             raise ValueError(f"Provider config for '{self.provider_id}' is missing 'api_key_name' or 'client_class'.")
 
         try:
-            # Load the API key from secure storage, or prompt the user if it's not found.
-            # This can raise ValueError if the user cancels the prompt.
+            # This helper method will first try to load the key from secure storage.
+            # If it's not found, it will use the provided UI callback to prompt the user.
             api_key = self._load_or_prompt_key(
                 key_name=key_name,
                 agent_desc=f"{provider_display_name} Agent",
@@ -172,17 +169,12 @@ class AgentManager:
 
     def reinitialize_agent(self, provider_id: str, model_id: str):
         """
-        Re-initializes the agent with a new provider or model.
-
-        This is the public method called by the UI when the user changes the model selection.
+        Public method to re-initialize the agent with a new provider or model.
+        This is typically called by the UI when the user changes the model selection.
 
         Args:
             provider_id: The new provider ID.
             model_id: The new model ID.
-
-        Raises:
-            ValueError: If new model IDs are invalid.
-            RuntimeError: If re-initialization fails.
         """
         logger.info(f"Re-initializing AgentManager with Provider='{provider_id}', Model='{model_id}'...")
         if not provider_id or not model_id:
@@ -196,10 +188,10 @@ class AgentManager:
 
     async def handle_api_error_and_reinitialize(self, error_type_str: str, error_message: str) -> bool:
         """
-        Handles an API error by prompting the user to update keys or retry.
+        Handles an API error by prompting the user for action (e.g., update key, retry).
 
-        This is called by the WorkflowManager when an API call fails with an
-        AuthenticationError or RateLimitError. It uses the UI callback to show a dialog.
+        This is called by the WorkflowManager when an LLM call fails with a recoverable
+        API error. It uses a UI callback to show a dialog and acts on the user's response.
 
         Args:
             error_type_str: "AuthenticationError" or "RateLimitError".
@@ -251,7 +243,7 @@ class AgentManager:
 
     def clear_stored_keys(self) -> bool:
         """
-        Deletes all stored API keys and tokens defined in the providers config.
+        Deletes all API keys and tokens defined in the providers config from secure storage.
 
         Returns:
             True if all deletions were successful (or keys didn't exist), False otherwise.
@@ -259,7 +251,6 @@ class AgentManager:
         logger.warning("Attempting to clear all stored API keys/tokens.")
         all_cleared = True
         for provider_id, data in self.config_manager.providers_config.items():
-            # Iterate through all configured providers and delete the associated key.
             key_name = data.get("api_key_name")
             if key_name:
                 try:
@@ -278,9 +269,28 @@ class AgentManager:
             logger.error("Failed to clear one or more stored API keys/tokens. Check previous logs or keyring backend status.")
             return False
 
+    def reinitialize_agent_with_new_key(self, new_api_key: str):
+        """
+        Stores a new API key provided by the user and re-initializes the agent.
+        This is part of the error recovery flow after an authentication failure.
+        """
+        if not self.provider_id or not self.model_id:
+            raise RuntimeError("Cannot re-initialize agent with new key: provider or model ID is not set.")
+
+        provider_config = self.config_manager.providers_config.get(self.provider_id)
+        if not provider_config:
+            raise RuntimeError(f"Provider configuration for '{self.provider_id}' not found.")
+
+        api_key_name = provider_config.get("api_key_name")
+        if not api_key_name:
+            raise RuntimeError(f"Provider '{self.provider_id}' does not have an 'api_key_name' defined in its configuration.")
+
+        store_credential(api_key_name, new_api_key)
+        self.reinitialize_agent(self.provider_id, self.model_id)
+
     def invoke_agent(self, system_prompt: ChatMessage, messages: List[ChatMessage], temperature: float = 0.1) -> ChatMessage:
         """
-        Invokes the currently configured agent with a system prompt and message history.
+        The main public method to make an LLM call using the currently configured agent.
 
         Args:
             system_prompt: The system prompt message.
@@ -289,19 +299,14 @@ class AgentManager:
 
         Returns:
             The ChatMessage response from the invoked agent.
-
-        Raises:
-            RuntimeError: If the agent client is not initialized.
         """
-        logger.debug(f"Invoking agent with temperature: {temperature}")
-        
+        logger.debug(f"Invoking agent with temperature: {temperature}") 
         # Ensure the agent has been initialized before trying to use it.
         if not self.agent:
             raise RuntimeError("Agent client is not initialized.")
-
         all_messages: List[ChatMessage] = [system_prompt] + messages
         
-        # Delegate the actual chat call to the specific client instance (e.g., OpenAIClient).
+        # Delegate the actual chat call to the specific client instance (e.g., OpenAIClient, GoogleGenAIClient).
         logger.debug(f"Using {type(self.agent).__name__} with model {self.model_id} and temp {temperature}")
         return self.agent.chat(all_messages, temperature=temperature)
 
@@ -309,7 +314,7 @@ class AgentManager:
         """
         Loads an API key or token from secure storage. If not found or invalid,
         it attempts to prompt the user using the provided callback function.
-        
+
         Args:
             key_name: The identifier used for storing/retrieving the key/token.
             agent_desc: A user-friendly description of the agent for the prompt.
@@ -317,11 +322,6 @@ class AgentManager:
 
         Returns:
             The retrieved or newly entered API key/token.
-
-        Raises:
-            ValueError: If the key/token is not found and cannot be prompted for, or if the user
-                        cancels/provides invalid input.
-            RuntimeError: If storing the newly entered key/token fails.
         """
         key_type_prompt = f"API Key for {agent_desc}"
 
@@ -338,15 +338,14 @@ class AgentManager:
         # Check if a UI callback for prompting is available.
         if prompt_cb:
             try:
-                # Customize the prompt title and message for Hugging Face tokens
-                # to guide the user more effectively.
+                # Customize the prompt for Hugging Face tokens to guide the user better.
                 prompt_title = f"API Key for {agent_desc} Required"
                 prompt_message = f"Please enter the API Key for {agent_desc}."
                 if self.provider_id == "huggingface":
                     prompt_title = "Hugging Face Token Required"
                     prompt_message = "Please enter your Hugging Face User Access Token.\nIt must start with 'hf_'."
 
-                # Call the provided callback function (which should handle UI interaction).
+                # Call the UI callback, which will block this thread until the user responds.
                 # This call will block the current thread until the user responds to the dialog.
                 api_key_input = prompt_cb(
                     prompt_title, # Use the more specific title
@@ -363,7 +362,7 @@ class AgentManager:
                 api_key_stripped = api_key_input.strip()
                 if api_key_stripped:
                     try:
-                        # If the input is valid, store it securely for future use.
+                        # Store the valid, new key for future sessions.
                         store_credential(key_name, api_key_stripped)
                         logger.info(f"Stored new API key for {agent_desc} securely.")
                         return api_key_stripped
@@ -378,17 +377,15 @@ class AgentManager:
                 logger.error(f"User cancelled or provided no API key entry for {agent_desc}.")
                 raise ValueError(f"API key for {agent_desc} was not provided by the user.")
         else:
-            # This is a critical failure: key not found and no way to ask the user for it.
+            # This is a critical failure: key not found and no UI to ask the user for it.
             logger.error(f"Cannot prompt for API key for {agent_desc}: No input callback provided.")
             raise ValueError(f"API key for {agent_desc} not found and cannot prompt user.")
 
     @property
     def agent_client(self) -> Union[LlmClient, HuggingFaceClient, GoogleGenAIClient, OpenAIClient]:
         """
-        Provides public, read-only access to the initialized agent client.
-
-        Raises a RuntimeError if the agent has not been successfully initialized,
-        preventing other parts of the application from using a non-functional client.
+        Provides public, read-only access to the initialized agent client, raising
+        an error if the agent has not been successfully initialized.
         """
         if self.agent is None:
             logger.error("Attempted to access agent client before successful initialization.")

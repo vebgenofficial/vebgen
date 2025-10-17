@@ -8,14 +8,9 @@ a = Analysis(
     pathex=['.'],
     binaries=[],
     datas=[
-        # This is the most important part for your project.
-        # It bundles your entire 'src' directory, which includes the 'ui', 'core',
-        # and 'plugins' packages. This ensures that your application can find
-        # all its assets, prompts, and other data files at runtime.
         ('backend\\src', 'backend\\src')
     ],
     hiddenimports=[
-        # Explicitly include modules that might be missed by static analysis.
         'keyring.backends.win32', # For Windows secure storage
         'pkg_resources.py2_warn',
         'src.plugins.django.prompts', # For dynamically loaded Django prompts

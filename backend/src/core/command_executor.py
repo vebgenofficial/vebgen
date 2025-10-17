@@ -1,8 +1,10 @@
 # c:\Users\rames\WebGen\web_agent7\backend\src\core\command_executor.py
+import time
 import subprocess
 import logging # Keep logging 
 import json # Import the json module
 import shlex # <--- Import is present
+import shutil
 import sys
 import platform
 import threading
@@ -25,16 +27,8 @@ class FileSystemManager: # Keep this placeholder if you test CommandExecutor sta
         if ".." in Path(path_str).parts: raise ValueError("Path contains '..'")
         return resolved
 
-# --- FIX: Import InterruptedError (adjust path if needed) ---
-try:
-    # Assuming workflow_manager is in the same directory or accessible via sys.path - Corrected path
-    from .workflow_manager import InterruptedError
-except ImportError:
-    # Define a placeholder if the import fails (e.g., during testing)
-    class InterruptedError(Exception): pass
-# --- End FIX ---
 # --- FIX: Import BlockedCommandException ---
-from .exceptions import BlockedCommandException
+from .exceptions import BlockedCommandException, InterruptedError
 # --- End FIX ---
 logger = logging.getLogger(__name__)
 # Basic logging setup if run standalone for testing
@@ -123,48 +117,6 @@ class CommandExecutor:
         logger.warning(f"Blocked unsafe or invalid 'type' command: type {' '.join(args)}")
         return False
 
-    def _parse_python_traceback(self, stderr: str) -> Optional[Dict[str, Any]]:
-        """
-        Parses a Python traceback from a string (typically from stderr) into a structured dictionary.
-        This allows the remediation system to understand the error more deeply than just reading text.
-        """
-        # This regex captures the main traceback body, the error type, and the error message.
-        traceback_match = re.search(
-            r"Traceback \(most recent call last\):(.+?)^(?P<type>[a-zA-Z_]\w*Error): (?P<msg>.*)",
-            stderr, re.DOTALL | re.MULTILINE
-        )
-        if not traceback_match:
-            # If a full traceback isn't found, try to match a simple "ErrorType: message" line.
-            # Add a check for simple error lines if no traceback is found
-            # e.g., "ModuleNotFoundError: No module named 'asgiref'"
-            simple_error_match = re.match(r"^(?P<type>[a-zA-Z_]\w*Error): (?P<msg>.*)", stderr.strip())
-            if simple_error_match:
-                return {
-                    "errorType": simple_error_match.group('type'),
-                    "message": simple_error_match.group('msg').strip(),
-                    "stack": []
-                }
-            return None
-
-        traceback_body, error_type, error_message = traceback_match.group(1), traceback_match.group('type'), traceback_match.group('msg').strip()
-        stack = []
-        # This regex iterates through the traceback body to find each "File ..., line ..., in ..." frame.
-        frame_regex = re.compile(r'^\s*File "(?P<file>[^"]+)", line (?P<line>\d+), in .*\n\s*(?P<code>.*)', re.MULTILINE)
-
-        for match in frame_regex.finditer(traceback_body):
-            file_path_full = match.group('file')
-            # Try to make the file path relative to the project root for cleaner context.
-            file_path_relative = file_path_full
-            try:
-                # Use self.project_root for making path relative
-                file_path_relative = str(Path(file_path_full).relative_to(self.project_root))
-            except (ValueError, AttributeError):
-                pass # File is not within the project root, keep full path
-            
-            # Append the structured frame information to the stack list.
-            stack.append({"file": file_path_relative.replace('\\', '/'), "line": int(match.group('line')), "code": match.group('code').strip()})
-
-        return {"errorType": error_type, "message": error_message, "stack": stack}
     def _validate_path_for_command(self, path_arg: str) -> bool:
         """
         A reusable helper for command validators to check if a path argument is safe.
@@ -184,7 +136,7 @@ class CommandExecutor:
             return False
         return True
 
-    def __init__(self, project_root_path: str | Path, confirmation_cb: Optional[ConfirmationCallback] = None):
+    def __init__(self, project_root_path: str | Path, confirmation_cb: Optional[ConfirmationCallback] = None, stop_event: Optional[threading.Event] = None):
         """
         Initializes the CommandExecutor.
 
@@ -221,15 +173,22 @@ class CommandExecutor:
             raise ValueError(f"Invalid project root path: {e}") from e
             
         # --- Load Command Blocklist ---
-        blocklist_path = Path(__file__).parent / 'command_blocklist.json'
-        if blocklist_path.exists():
-            with open(blocklist_path, 'r') as f:
+        # If self.blocklist_path is already set (e.g., by a test fixture), use it.
+        # Otherwise, default to the standard location. This makes the class more testable.
+        if not hasattr(self, 'blocklist_path'):
+            self.blocklist_path = Path(__file__).parent / 'command_blocklist.json'
+
+        if self.blocklist_path.exists():
+            with open(self.blocklist_path, 'r') as f:
                 self.blocklist = json.load(f)
         else:
             self.blocklist = {"command_patterns": []}
-            logger.warning(f"Command blocklist file not found at {blocklist_path}. No commands will be dynamically blocked/substituted by this mechanism.")
+            # Only log the warning if we are using the default path.
+            if not hasattr(self, 'blocklist_path'):
+                logger.warning(f"Command blocklist file not found at {self.blocklist_path}. No commands will be dynamically blocked/substituted by this mechanism.")
 
         self.confirmation_cb = confirmation_cb
+        self.stop_event = stop_event
 
         # --- Whitelist Configuration ---
         # Structure: command_key: (validator_function, needs_confirmation_check_function)
@@ -986,7 +945,14 @@ class CommandExecutor:
                         # Assuming the first captured group is the module path
                         module_path = param_match.group(1)
                         # Convert module path like 'auth.urls' to file path 'auth/urls.py'
-                        file_path = str(Path(module_path.replace('.', '/')).with_suffix('.py'))
+                        file_path_candidate = Path(module_path.replace('.', '/'))
+                        
+                        potential_dir = self.project_root / file_path_candidate
+                        if potential_dir.is_dir():
+                            file_path = str(file_path_candidate / '__init__.py')
+                        else:
+                            file_path = str(file_path_candidate.with_suffix('.py'))
+
                         safe_alternative = safe_alternative_template.format(file_path=file_path)
 
                 raise BlockedCommandException(command_str, safe_alternative, description)
@@ -1010,17 +976,13 @@ class CommandExecutor:
         """
         try:
             command_output = self.run_command(command)
-            success = command_output.exit_code == 0
-            
-            structured_error = None
-            if not success and command_output.stderr:
-                structured_error = self._parse_python_traceback(command_output.stderr)
-
+            success = command_output['exit_code'] == 0
+            structured_error = None # Analysis should happen in ErrorAnalyzer
             return CommandResult(
                 success=success,
-                exit_code=command_output.exit_code,
-                stdout=command_output.stdout,
-                stderr=command_output.stderr,
+                exit_code=command_output['exit_code'],
+                stdout=command_output['stdout'],
+                stderr=command_output['stderr'],
                 structured_error=structured_error,
                 command_str=command
             )
@@ -1174,12 +1136,20 @@ class CommandExecutor:
 
         # 4. Check for a virtual environment and use its executables if available.
         venv_executable_path: Optional[Path] = None
+        # --- FIX #4: Better Venv Fallback & Pre-validation ---
         if command_key_to_check in ["python", "pip", "django-admin", "gunicorn"]:
             venv_executable_path = self._get_venv_executable(command_key_to_check)
             if venv_executable_path:
                 logger.info(f"Using venv executable for '{command_key_to_check}': {venv_executable_path}")
                 command_parts[0] = str(venv_executable_path)
-            else: logger.warning(f"Venv not found or '{command_key_to_check}' not in venv. Using system command '{main_command_raw}'.")
+            else:
+                logger.debug(f"Venv executable for '{command_key_to_check}' not found. Checking system PATH.")
+                # --- FIX #2: Validate Command EXISTS Before Running ---
+                if not shutil.which(command_key_to_check):
+                    err_msg = f"Command not found: '{command_key_to_check}' is not in the system's PATH and a venv executable was not found."
+                    logger.error(err_msg)
+                    self.log_command_status(trimmed_command, success=False, details=err_msg)
+                    raise FileNotFoundError(err_msg)
 
         # 5. Prepare Command (Resolve relative paths to absolute paths for robustness).
         try:
@@ -1282,6 +1252,20 @@ class CommandExecutor:
                 encoding=sys.stdout.encoding or 'utf-8', errors='replace', bufsize=1,
                 startupinfo=startupinfo, creationflags=creationflags
             )
+            
+            # --- FIX #3: Check If Process Actually Started ---
+            # Give it a moment to start, then check if it has already exited.
+            time.sleep(0.1)
+            if process.poll() is not None:
+                # Process exited immediately, likely due to "command not found" or a quick error.
+                returncode = process.returncode
+                logger.error(f"Process for command '{trimmed_command}' exited immediately with code {returncode}.")
+                # Don't start threads; read streams directly to avoid hanging.
+                stdout_full = process.stdout.read() if process.stdout else ""
+                stderr_full = process.stderr.read() if process.stderr else ""
+                logger.error(f"Immediate exit STDERR: {stderr_full}")
+                self.log_command_status(trimmed_command, success=False, details=stderr_full or stdout_full)
+                return CommandOutput(command=trimmed_command, exit_code=returncode, stdout=stdout_full, stderr=stderr_full)
 
             # Read stdout and stderr streams in separate threads to prevent deadlocks.
             def read_stream(stream, output_list, log_prefix, log_level):
@@ -1301,10 +1285,40 @@ class CommandExecutor:
             # Log the start and end of the command's output for clarity in logs.
             logger.debug(f"--- Command Output Start: {log_cmd_str} ---")
             stdout_thread.start(); stderr_thread.start()
-            stdout_thread.join(); stderr_thread.join()
+
+            # --- NEW: Polling loop for responsive stop ---
+            while process.poll() is None:
+                if self.stop_event and self.stop_event.is_set():
+                    logger.warning(f"Stop event received. Terminating process {process.pid} for command: '{trimmed_command}'")
+                    # Terminate the process gracefully first
+                    process.terminate()
+                    try:
+                        # Wait for a short period for the process to terminate
+                        process.wait(timeout=5)
+                        logger.info(f"Process {process.pid} terminated gracefully.")
+                    except subprocess.TimeoutExpired:
+                        # If it doesn't terminate, kill it
+                        logger.warning(f"Process {process.pid} did not terminate gracefully. Killing.")
+                        process.kill()
+                        process.wait() # Wait for the kill to complete
+                    raise InterruptedError(f"Command execution stopped by user: {trimmed_command}")
+                time.sleep(0.2) # Poll every 200ms
+
+            # --- END NEW ---
+
+            # The process has finished, join the threads to gather all output
+            # --- FIX #1: Add Timeouts to Thread Joins ---
+            join_timeout = 60.0 # seconds
+            stdout_thread.join(timeout=join_timeout)
+            stderr_thread.join(timeout=join_timeout)
             logger.debug(f"--- Command Output End: {log_cmd_str} ---")
 
-            return_code = process.wait()
+            if stdout_thread.is_alive() or stderr_thread.is_alive():
+                logger.error(f"Threads for command '{trimmed_command}' did not finish within {join_timeout}s. Process will be killed.")
+                if process.poll() is None: process.kill()
+                raise TimeoutError(f"Command execution timed out after {join_timeout} seconds: {trimmed_command}")
+
+            return_code = process.returncode
             stdout_full = "\n".join(stdout_lines).strip()
             stderr_full = "\n".join(stderr_lines).strip()
 

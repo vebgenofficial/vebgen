@@ -223,6 +223,9 @@ class HuggingFaceClient:
                  status_code = e.response.status_code if e.response is not None else 'Unknown'
                  logger.warning(f"HF HTTP error occurred on attempt {attempt} after {duration:.2f} seconds: Status {status_code}")
                  last_exception = e
+                 # --- FIX: Raise immediately on the last attempt ---
+                 if attempt >= self.max_retries - 1:
+                     raise
                  if isinstance(status_code, int) and (status_code == 408 or 500 <= status_code < 600): # Retry 5xx and 408
                      logger.info(f"Retryable HF HTTP error encountered (Status: {status_code}).")
                      should_retry = True
@@ -247,9 +250,11 @@ class HuggingFaceClient:
             if should_retry and attempt < self.max_retries -1:
                 logger.info(f"Waiting {wait_time:.2f} seconds before HF retry ({attempt + 1}/{self.max_retries})...")
                 time.sleep(wait_time)
-            elif should_retry and attempt >= self.max_retries:
+            elif should_retry and attempt >= self.max_retries - 1:
                 logger.error(f"Max retries ({self.max_retries}) reached for HF model {self.model}.")
-                if last_exception: raise last_exception
+                # --- FIX: Re-raise the last specific exception for better error reporting ---
+                if last_exception:
+                    raise last_exception
                 else: raise RuntimeError(f"Max retries reached for HF model {self.model}, but no specific exception recorded.")
 
         # Fallback if loop finishes unexpectedly

@@ -10,31 +10,42 @@ import threading
 import queue
 import math
 import asyncio
+import os # Import the os module
 import re
 import platform
 import sys # For command execution output redirection (optional)
+import difflib # NEW: Import for calculating line-by-line diffs
+import ast # For parsing action parameters
+from datetime import datetime # For structured logging
 import subprocess # For command execution
 import shlex
 from tkinter import scrolledtext, messagebox, filedialog, simpledialog, Menu, StringVar, BooleanVar, END, WORD, BOTH, X, LEFT, RIGHT, BOTTOM, SUNKEN, NORMAL, DISABLED, W, E, ttk
 from pathlib import Path # Keep Path import
 from typing import List, Dict, Any, Optional, Tuple, Callable, Awaitable, Union
+
+# --- NEW: Imports for Syntax Highlighting ---
+from pygments import highlight, lex
+from pygments.lexers import get_lexer_by_name, guess_lexer, TextLexer
+from pygments.formatters import HtmlFormatter
+from html.parser import HTMLParser
+# --- END NEW ---
 from functools import partial # For creating button commands with arguments
 import json # Import json
 
 # Import core components
 # Assuming they are in the 'core' directory relative to 'src'
 try:
-    from src.core.workflow_manager import WorkflowManager, RequestCommandExecutionCallable # Import the specific callback type
-    from src.core.agent_manager import AgentManager # Use relative import
-    from src.core.memory_manager import MemoryManager
-    from src.core.config_manager import ConfigManager
-    from src.core.file_system_manager import FileSystemManager
-    from src.core.command_executor import CommandExecutor
-    from src.core.secure_storage import check_keyring_backend
-    from src.core.secure_storage import store_credential, delete_credential, retrieve_credential # Import storage functions
-    # Import specific exceptions if needed for more granular handling
-    from src.core.llm_client import RateLimitError, AuthenticationError
-    from src.core.workflow_manager import InterruptedError
+    from ..core.workflow_manager import WorkflowManager, RequestCommandExecutionCallable # Import the specific callback type
+    from ..core.agent_manager import AgentManager # Use relative import
+    from ..core.memory_manager import MemoryManager
+    from ..core.config_manager import ConfigManager
+    from ..core.file_system_manager import FileSystemManager, PatchApplyError
+    from ..core.command_executor import CommandExecutor
+    from ..core.secure_storage import check_keyring_backend, store_credential
+    # Import specific exceptions for handling workflow interruptions
+    from ..core.llm_client import RateLimitError, AuthenticationError
+    from ..core.workflow_manager import InterruptedError
+    from ..core.project_models import FeatureStatusEnum
 except ImportError as e:
     # Handle potential import errors if the structure is different or files are missing
     logging.error(f"Failed to import core components: {e}. Ensure core modules are in the correct path.")
@@ -87,10 +98,109 @@ STATUS_COLORS = {
     "success": "#2ECC71",      # Green
     "error": "#E81123",        # Red
 }
+
+# --- NEW: Status Colors for Command Cards ---
+STATUS_COLORS = {
+    "pending": "#3B82F6",      # Blue
+    "running": "#F97316",      # Orange
+    "success": "#10B981",      # Green
+    "error": "#EF4444",        # Red
+}
 # --- End Constants ---
+
+# --- NEW: Color mapping for log levels ---
+level_colors = {
+    "INFO": "#8BE9FD",    # Cyan
+    "WARNING": "#F9E2AF", # Yellow
+    "ERROR": "#EF4444",   # Red
+    "DEBUG": "#A0A0A0",   # Gray
+}
+
+# --- NEW: Status Badges for Command Cards ---
+STATUS_BADGES = {
+    "pending": ("⏳", "#3B82F6"),
+    "running": ("⚡", "#F97316"),
+    "success": ("✅", "#10B981"),
+    "error": ("❌", "#EF4444"),
+    "skipped": ("⏭️", "#9CA3AF"),
+}
+
+# --- NEW: Icons for Action Cards ---
+ACTION_ICONS = {
+    # File Operations
+    "GET_FULL_FILE_CONTENT": "📄",
+    "WRITE_FILE": "✨",
+    "PATCH_FILE": "✏️",
+    "DELETE_FILE": "🗑️",
+    # Execution
+    "RUN_COMMAND": "⚡",
+    "CREATE_DIRECTORY": "📁",
+    # Agent/User Interaction
+    "REQUEST_USER_INPUT": "👤",
+    "TARS_CHECKPOINT": "🤔",
+    "ROLLBACK": "⏪",
+    "FINISH_FEATURE": "🏁",
+    "ABORT": "🛑",
+}
+
+FILE_ICONS = {
+    'py': '🐍',
+    'js': '📜',
+    'html': '🌐',
+    'css': '🎨',
+    'json': '📋',
+    'md': '📝',
+    'txt': '📄',
+    'sh': '❯',
+    'yml': '⚙️',
+    'yaml': '⚙️',
+    'toml': '⚙️',
+}
 
 
 class MainWindow:
+    """Main GUI window for VebGen"""
+
+    # ✅ Add these class-level dictionaries
+    ACTION_ICONS = {
+        "GET_FULL_FILE_CONTENT": "📄",
+        "WRITE_FILE": "✨",
+        "PATCH_FILE": "✏️",
+        "UPDATE_FILE": "✏️",
+        "DELETE_FILE": "🗑️",
+        "READ_FILE": "👀",
+        "RUN_COMMAND": "⚡",
+        "CREATE_DIRECTORY": "📁",
+        "INSTALL_PACKAGE": "📦",
+        "APPLY_PATCH": "🔧",
+        "ANALYZE_CODE": "🔍",
+        "RUN_TESTS": "🧪",
+        "LINT_CODE": "🔬",
+        "GIT_COMMIT": "💾",
+        "GIT_PUSH": "☁️",
+        "GIT_PULL": "⬇️",
+        "RUN_MIGRATIONS": "🗄️",
+        "CREATE_MODEL": "📊",
+    }
+
+    FILE_ICONS = {
+        'py': '🐍',
+        'js': '📜',
+        'ts': '📘',
+        'jsx': '⚛️',
+        'tsx': '⚛️',
+        'html': '🌐',
+        'css': '🎨',
+        'scss': '🎨',
+        'json': '📋',
+        'yaml': '📋',
+        'yml': '📋',
+        'md': '📝',
+        'txt': '📄',
+        'sql': '🗄️',
+        'sh': '🔧',
+        'env': '🔐',
+    }
     """
     Main application window for the AI Agent Development tool.
 
@@ -106,10 +216,40 @@ class MainWindow:
             master: The root Tkinter window instance.
         """
         self.master = master
+        self.logger = logging.getLogger(__name__)
         self.master.title("Vebgen")
         self.master.geometry("1280x768") # Wider to accommodate sidebar
-        self.master.minsize(1024, 700)   # Adjusted minimum size
+        self.master.minsize(1024, 700) # BUG FIX #3: Set default cursor
+        self.default_cursor_spec = "arrow" # Default fallback cursor
         self.master.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Load custom cursor
+        cursor_path = Path(__file__).parent / "assets" / "vebgen_cursor.cur"
+        if cursor_path.exists():
+            try:
+                cursor_spec = f"@{cursor_path.as_posix()}"
+                if platform.system() == "Windows" and ' ' in str(cursor_path):
+                    # On Windows, paths with spaces are problematic for Tcl/Tk.
+                    # The most robust solution is to get the "short name" (8.3 filename).
+                    import ctypes
+                    from ctypes import wintypes
+
+                    _GetShortPathNameW = ctypes.windll.kernel32.GetShortPathNameW
+                    _GetShortPathNameW.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+                    _GetShortPathNameW.restype = wintypes.DWORD
+
+                    buffer = ctypes.create_unicode_buffer(len(str(cursor_path)) + 1)
+                    if _GetShortPathNameW(str(cursor_path), buffer, len(buffer)):
+                        short_path = buffer.value
+                        cursor_spec = f"@{Path(short_path).as_posix()}"
+                        logger.info(f"Using Windows short path for cursor to avoid spaces: {short_path}")
+                self.default_cursor_spec = cursor_spec
+                self.master.config(cursor=self.default_cursor_spec)
+            except Exception as e:
+                logger.error(f"Failed to set custom cursor, falling back to arrow. Error: {e}")
+                self.master.config(cursor="arrow")
+        else:
+            self.master.config(cursor=self.default_cursor_spec)
+        logger.info(f"Custom cursor: {cursor_path.exists()}")
 
         # Set the application icon, handling different OS requirements.
         # --- Set Window Icon (Platform-Specific) ---
@@ -158,8 +298,12 @@ class MainWindow:
         self.workflow_manager_instance: Optional[WorkflowManager] = None
         self.last_selected_framework: Optional[str] = None
         self.core_components_initialized = False # Tracks if core backend is ready
+        self.is_new_project_at_selection: bool = True # New flag to latch the project state
+        self.is_continuing_run = False # New flag to track if we are resuming a stopped job
         self.is_running = False # Tracks if a background workflow is active
+        self.is_browsing_files = False # New flag for file browser mode
         self.available_frameworks: List[str] = [] # Populated by ConfigManager
+        self.stop_event_thread = threading.Event() # For command executor
         self.needs_initialization = True # Flag for WorkflowManager initialization
         self.ui_communicator = self
 
@@ -196,6 +340,7 @@ class MainWindow:
         self.case_temp_label: Optional[ctk.CTkLabel] = None # Keep this reference
         self.case_temp_scale: Optional[ctk.CTkSlider] = None
         self.notebook: Optional[ctk.CTkTabview] = None
+        self.change_api_key_button: Optional[ctk.CTkButton] = None
         self.updates_display: Optional[tk.Text] = None
         self.conversation_display: Optional[ctk.CTkTextbox] = None
         self.status_frame: Optional[ctk.CTkFrame] = None
@@ -203,6 +348,7 @@ class MainWindow:
         self.updates_status_frame: Optional[ctk.CTkFrame] = None
         self.updates_status_label: Optional[ctk.CTkLabel] = None # This will be removed
         self.conversation_status_frame: Optional[ctk.CTkFrame] = None
+        self.code_output_tab: Optional[tk.Frame] = None
         self.conversation_status_label: Optional[ctk.CTkLabel] = None
         self.progress_bar: Optional[ctk.CTkProgressBar] = None # This will be removed
         self.logo_image: Optional[ctk.CTkImage] = None
@@ -210,6 +356,21 @@ class MainWindow:
         self.wash_effect_image: Optional[ctk.CTkImage] = None
         self.wash_effect_label: Optional[ctk.CTkLabel] = None
         self.animation_label: Optional[ctk.CTkLabel] = None # For loading animation
+        self.logo_photo_image: Optional[ImageTk.PhotoImage] = None # Store PhotoImage for icons
+        # --- NEW: Attributes for modern log display ---
+        # --- NEW: Attributes for modern IDE features ---
+        self.left_diff_text: Optional[ctk.CTkTextbox] = None
+        self.right_diff_text: Optional[ctk.CTkTextbox] = None
+        self.command_card_frame: Optional[ctk.CTkScrollableFrame] = None
+        # --- NEW: Attributes for enhanced status bar ---
+        self.status_icon: Optional[ctk.CTkLabel] = None
+        self.status_text: Optional[ctk.CTkLabel] = None
+        self.model_badge_label: Optional[ctk.CTkLabel] = None
+        self.step_label: Optional[ctk.CTkLabel] = None
+        self.time_label: Optional[ctk.CTkLabel] = None
+        self.start_time: Optional[float] = None
+        self.timer_job: Optional[str] = None
+        # --- END NEW ---
         self.animation_job: Optional[str] = None # To hold the .after() job ID
 
         # --- Threading and Queue for UI Updates ---
@@ -242,6 +403,12 @@ class MainWindow:
         # Periodically check the queue for messages from background threads.
         self.master.after(100, self._process_ui_queue)
 
+        # --- NEW: Setup keyboard shortcuts ---
+        self.setup_keyboard_shortcuts()
+
+        # --- NEW: Bind Command Palette shortcut ---
+        self.master.bind("<Control-Shift-P>", lambda e: self.create_command_palette())
+
         logger.info("MainWindow initialized. Waiting for project directory selection.")
         self.status_var.set("Please select a project directory via File menu.")
         # Initially disable controls that require a project context.
@@ -261,13 +428,13 @@ class MainWindow:
         # --- Text Area Tags for Formatting Messages ---
         # These will be applied to CTkTextbox widgets
         self.text_tags = {
-            "user": {"font": ("Segoe UI", 14, 'bold')},
-            "system": {"foreground": "#A0A0A0", "font": ("Segoe UI", 12, 'italic')},
-            "error": {"foreground": "#E81123", "font": ("Segoe UI", 12, 'bold')},
-            "warning": {"foreground": "#F7630C", "font": ("Segoe UI", 12)},
-            "agent_name": {"foreground": "#0078D4", "font": ("Segoe UI", 14, 'bold')},
-            "action": {"foreground": "#0078D4", "font": ("Segoe UI", 12, 'bold')},
-            "success": {"foreground": "#2ECC71", "font": ("Segoe UI", 12, 'bold')},
+            "user": {"font": ("Calibri", 16, 'bold'), "foreground": "#FFFFFF"},
+            "system": {"foreground": "#B0B0B0", "font": ("Calibri", 14, 'italic')},
+            "error": {"foreground": "#FF5555", "font": ("Calibri", 14, 'bold')},
+            "warning": {"foreground": "#FFB86C", "font": ("Calibri", 14)},
+            "agent_name": {"foreground": "#50FA7B", "font": ("Calibri", 16, 'bold')},
+            "action": {"foreground": "#8BE9FD", "font": ("Calibri", 14, 'bold')},
+            "success": {"foreground": "#50FA7B", "font": ("Calibri", 14, 'bold')},
             # Code tag for command entry widgets and code blocks - darker background
             "code": {"font": ("Consolas", 11), "background": "#252526", "foreground": "#DCE4EE", "wrap": "none",
                      "lmargin1": 10, "lmargin2": 10, "spacing1": 5, "spacing3": 5, "relief": tk.GROOVE, "borderwidth": 1},
@@ -275,8 +442,100 @@ class MainWindow:
             "command_output": {"font": ("Consolas", 11), "foreground": "#CCCCCC", "background": "#252526", "wrap": "none",
                                "lmargin1": 10, "lmargin2": 10, "spacing1": 2, "spacing3": 2},
             # Default tag for regular messages
-            "default": {"font": ("Segoe UI", 14)}
+            "default": {"font": ("Calibri", 16), "foreground": "#FFFFFF"}
         }
+        # BUG FIX #4: Add new text tags for better styling
+        self.text_tags.update({
+            "header": {
+                "font": ("Segoe UI", 14, "bold"),
+                "foreground": "#3B82F6"
+            },
+            "code_label": {
+                "font": ("Consolas", 10, "bold"),
+                "foreground": "#6366F1"
+            },
+            "code_block": {
+                "font": ("Consolas", 9),
+                "foreground": "#F8F8F2",
+                "background": "#1E1E2E"
+            },
+            "error": {
+                "font": ("Segoe UI", 12, "bold"),
+                "foreground": "#EF4444"
+            }
+        })
+
+    def _configure_text_widget_tags(self, text_widget: ctk.CTkTextbox):
+        """Applies all configured text tags to a given CTkTextbox widget."""
+        if not text_widget or not text_widget.winfo_exists():
+            return
+        
+        # --- NEW: Improved Tag Styling ---
+        # CASE agent (primary)
+        text_widget.tag_config(
+            "case_tag",
+            foreground="#3b82f6",  # Blue
+            font=("Segoe UI", 10, "normal")
+        )
+        # TARS agent (secondary)
+        text_widget.tag_config(
+            "tars_tag",
+            foreground="#8b5cf6",  # Purple
+            font=("Segoe UI", 10, "normal")
+        )
+        # System messages (neutral)
+        text_widget.tag_config(
+            "system_tag",
+            foreground="#6b7280",  # Gray
+            font=("Segoe UI", 10, "normal")
+        )
+        # User messages (highlight)
+        text_widget.tag_config(
+            "user_tag",
+            foreground="#10b981",  # Green
+            font=("Segoe UI", 10, "bold")
+        )
+        # Error messages (danger)
+        text_widget.tag_config(
+            "error_tag",
+            foreground="#ef4444",  # Red
+            font=("Segoe UI", 10, "bold")
+        )
+        # Success messages (positive)
+        text_widget.tag_config(
+            "success_tag",
+            foreground="#10b981",  # Green
+            font=("Segoe UI", 10, "normal")
+        )
+
+        # --- NEW: Add tags for diff highlighting ---
+        self.text_tags['diff_add'] = {"background": "#1A4A3A"} # Light green background
+        self.text_tags['diff_delete'] = {"background": "#5A2D2D"} # Light red background
+        # --- NEW: Add tags for syntax highlighting (Monokai theme colors) ---
+        self.text_tags['syntax_keyword'] = {"foreground": "#f92672"}
+        self.text_tags['syntax_string'] = {"foreground": "#e6db74"}
+        self.text_tags['syntax_comment'] = {"foreground": "#75715e"}
+        self.text_tags['syntax_number'] = {"foreground": "#ae81ff"}
+        self.text_tags['syntax_function'] = {"foreground": "#a6e22e"}
+        self.text_tags['syntax_class'] = {"foreground": "#a6e22e"}
+        self.text_tags['syntax_operator'] = {"foreground": "#f92672"}
+        self.text_tags['syntax_builtin'] = {"foreground": "#66d9ef", "font": ("Consolas", 11, "italic")}
+        # --- END NEW ---
+
+        # Iterate through the configurations and apply them correctly.
+        for tag_name, config in self.text_tags.items():
+            # Create a copy of the config to modify it safely, removing the 'font' key.
+            tag_specific_config = config.copy()
+            
+            # --- FIX: Remove the 'font' key to prevent the crash ---
+            # We will rely on the default font of the CTkTextbox for now.
+            # This resolves the AttributeError and allows the app to run.
+            if "font" in tag_specific_config:
+                del tag_specific_config["font"]
+            
+            # Apply the (now corrected) configuration to the tag.
+            # The ** operator unpacks the dictionary into keyword arguments.
+            text_widget.tag_config(tag_name, **tag_specific_config)
 
     def update_task_in_ui(self, task_id: str, updates: Dict[str, Any]):
         """
@@ -367,7 +626,7 @@ class MainWindow:
         # Project Selection
         project_frame = ctk.CTkFrame(parent_frame, fg_color="transparent")
         project_frame.pack(pady=(0, 25), padx=0, fill=X)
-        self.project_path_label = ctk.CTkLabel(project_frame, textvariable=self.project_path_var, fg_color="#3C3C3C", corner_radius=5, height=30, font=ctk.CTkFont(family="Consolas", size=12), anchor="w", padx=10)
+        self.project_path_label = ctk.CTkLabel(project_frame, textvariable=self.project_path_var, fg_color="#3C3C3C", corner_radius=5, height=30, font=ctk.CTkFont(family="Consolas", size=13), anchor="w", padx=10)
         self.project_path_label.pack(fill=X, pady=(0, 10))
         ToolTip(self.project_path_label, text="Current project directory.")
 
@@ -375,7 +634,7 @@ class MainWindow:
             project_frame,
             text="📂  Select Project Directory...",
             command=self.select_project_directory,
-            font=ctk.CTkFont(size=20)   # bigger emoji/text
+            font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold")
         )
         self.select_project_button.pack(fill=X, ipady=8, pady=6)
 
@@ -391,10 +650,10 @@ class MainWindow:
         # Using a geometric shape character as a placeholder for the SVG.
         exec_icon_label = ctk.CTkLabel(exec_title_frame, text="⚙️", font=ctk.CTkFont(size=16))
         exec_icon_label.pack(side=LEFT, padx=(0, 8))
-        exec_title = ctk.CTkLabel(exec_title_frame, text="Execution Settings", font=ctk.CTkFont(size=14, weight="bold"))
+        exec_title = ctk.CTkLabel(exec_title_frame, text="Execution Settings", font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"))
         exec_title.pack(side=LEFT, anchor="w")
 
-        fw_label = ctk.CTkLabel(exec_settings_frame, text="Framework", anchor="w")
+        fw_label = ctk.CTkLabel(exec_settings_frame, text="Framework", anchor="w", font=ctk.CTkFont(family="Segoe UI", size=13))
         fw_label.pack(fill=X, pady=(0, 5))
         self.framework_dropdown = ctk.CTkComboBox(exec_settings_frame, variable=self.framework_var, state=DISABLED, command=self.on_framework_selected)
         self.framework_dropdown.pack(fill=X, pady=(0, 15))
@@ -419,16 +678,16 @@ class MainWindow:
 
         ai_icon_label = ctk.CTkLabel(ai_title_frame, text="🧠", font=ctk.CTkFont(size=20))
         ai_icon_label.grid(row=0, column=0, sticky="w", pady=2)
-        ai_title = ctk.CTkLabel(ai_title_frame, text="AI Model Settings", font=ctk.CTkFont(size=14, weight="bold"))
+        ai_title = ctk.CTkLabel(ai_title_frame, text="AI Model Settings", font=ctk.CTkFont(family="Segoe UI", size=16, weight="bold"))
         ai_title.grid(row=0, column=1, sticky="w", padx=8)
 
-        provider_label = ctk.CTkLabel(ai_settings_frame, text="API Provider", anchor="w")
+        provider_label = ctk.CTkLabel(ai_settings_frame, text="API Provider", anchor="w", font=ctk.CTkFont(family="Segoe UI", size=13))
         provider_label.pack(fill=X, pady=(0, 5))
         self.provider_dropdown = ctk.CTkComboBox(ai_settings_frame, variable=self.provider_var, state=DISABLED, command=self.on_provider_selected)
         self.provider_dropdown.pack(fill=X, pady=(0, 15))
         ToolTip(self.provider_dropdown, text="Select the AI service provider.")
 
-        model_label = ctk.CTkLabel(ai_settings_frame, text="LLM Model", anchor="w")
+        model_label = ctk.CTkLabel(ai_settings_frame, text="LLM Model", anchor="w", font=ctk.CTkFont(family="Segoe UI", size=13))
         model_label.pack(fill=X, pady=(0, 5))
         self.model_dropdown = ctk.CTkComboBox(ai_settings_frame, variable=self.model_var, state=DISABLED, command=self.on_model_selected)
         self.model_dropdown.pack(fill=X, pady=(0, 15))
@@ -437,7 +696,7 @@ class MainWindow:
         # Temperature Sliders
         tars_slider_frame = ctk.CTkFrame(ai_settings_frame, fg_color="transparent")
         tars_slider_frame.pack(fill=X, pady=(5,0))
-        self.tars_temp_label = ctk.CTkLabel(tars_slider_frame, text="Tars Temp", width=70, anchor="w")
+        self.tars_temp_label = ctk.CTkLabel(tars_slider_frame, text="Tars Temp", width=70, anchor="w", font=ctk.CTkFont(family="Segoe UI", size=13))
         self.tars_temp_label.pack(side=LEFT)
         self.tars_temp_scale = ctk.CTkSlider(tars_slider_frame, from_=0.0, to=1.0, variable=self.tars_temp_var, number_of_steps=10)
         self.tars_temp_scale.pack(side=LEFT, expand=True, fill=X, padx=10)
@@ -445,11 +704,19 @@ class MainWindow:
 
         case_slider_frame = ctk.CTkFrame(ai_settings_frame, fg_color="transparent")
         case_slider_frame.pack(fill=X, pady=(5,0))
-        self.case_temp_label = ctk.CTkLabel(case_slider_frame, text="Case Temp", width=70, anchor="w")
+        self.case_temp_label = ctk.CTkLabel(case_slider_frame, text="Case Temp", width=70, anchor="w", font=ctk.CTkFont(family="Segoe UI", size=13))
         self.case_temp_label.pack(side=LEFT)
         self.case_temp_scale = ctk.CTkSlider(case_slider_frame, from_=0.0, to=1.0, variable=self.case_temp_var, number_of_steps=10)
         self.case_temp_scale.pack(side=LEFT, expand=True, fill=X, padx=10)
         ToolTip(self.case_temp_scale, text="Adjust Case (Coder) temperature (0.0-1.0).")
+
+        # --- NEW: Change API Key Button ---
+        self.change_api_key_button = ctk.CTkButton(
+            ai_settings_frame, text="🔑 Change API Key...", command=self._change_api_key_manual, font=ctk.CTkFont(family="Segoe UI", size=13),
+            state=DISABLED
+        )
+        self.change_api_key_button.pack(fill=X, pady=(20, 0))
+        ToolTip(self.change_api_key_button, text="Manually update the API key for a selected provider.")
 
     def _create_main_content(self, parent_frame: ctk.CTkFrame):
         """Creates the main content area, including the prompt entry, notebook, and status bar."""
@@ -464,16 +731,23 @@ class MainWindow:
         prompt_icon = ctk.CTkLabel(prompt_wrapper, text=">", font=ctk.CTkFont(family="Consolas", size=16), text_color="#808080")
         prompt_icon.pack(side=LEFT, padx=(15, 10))
 
-        self.prompt_entry = ctk.CTkEntry(prompt_wrapper, placeholder_text="Describe your project goal...", font=ctk.CTkFont(size=16), border_width=0, height=40)
+        self.prompt_entry = ctk.CTkEntry(prompt_wrapper, placeholder_text="Describe your project goal...", font=ctk.CTkFont(family="Segoe UI", size=16), border_width=0, height=40)
         self.prompt_entry.pack(side=LEFT, fill=X, expand=True, pady=5)
-        self.prompt_entry.bind("<Return>", self.handle_send_prompt)
+        self.prompt_entry.bind("<Return>", self.handle_start_workflow)
+        ToolTip(self.prompt_entry, "Enter your main project goal here and press Start or Enter.")
 
         # Add an animation label that will be shown when busy
         self.animation_label = ctk.CTkLabel(prompt_wrapper, text="", font=ctk.CTkFont(family="Consolas", size=16), text_color="#0078D4")
         self.animation_label.pack(side=LEFT, padx=10)
 
-        self.send_button = ctk.CTkButton(prompt_wrapper, text="▶️ Start", command=self.handle_send_prompt, state=DISABLED, width=100, height=40, font=ctk.CTkFont(weight="bold"), corner_radius=6)
+        # --- MODIFIED: The send_button now handles Start, Stop, and Continue ---
+        self.send_button = ctk.CTkButton(
+            prompt_wrapper, text="▶️ Start", command=self.handle_start_stop_continue,
+            state=DISABLED, width=110, height=40,
+            font=ctk.CTkFont(family="Segoe UI", size=14, weight="bold"), corner_radius=6
+        )
         self.send_button.pack(side=RIGHT, padx=5, pady=5)
+        ToolTip(self.send_button, "Start, Stop, or Continue the agent's workflow (F5).")
 
         # Notebook
         self._create_notebook(parent_frame)
@@ -481,64 +755,63 @@ class MainWindow:
         # Status Bar
         # self._create_status_bar(parent_frame)
 
-    def _create_notebook(self, parent_frame: ctk.CTkFrame):
-        """Creates the tabbed notebook for displaying updates/logs and conversation."""
-        self.notebook = ctk.CTkTabview(parent_frame, border_width=1, border_color="#4A4A4A", segmented_button_selected_color="#0078D4", fg_color="#1E1E1E")
-        self.notebook.pack(expand=True, fill=BOTH, padx=20, pady=(0, 0))
+        self.create_enhanced_status_bar(parent_frame)
 
-        updates_tab = self.notebook.add("Updates / Logs")
-        conversation_tab = self.notebook.add("Conversation")
-
-        # --- Updates / Logs Tab ---
-        updates_main_frame = ctk.CTkFrame(updates_tab, fg_color="transparent")
-        updates_main_frame.pack(expand=True, fill=BOTH)
-
-        # --- FIX: Replace tk.Text with CTkScrollableFrame for consistent widget layout ---
-        self.updates_display = ctk.CTkScrollableFrame(
-            updates_main_frame,
+    def create_enhanced_status_bar(self, parent):
+        """Create a comprehensive status bar like VS Code"""
+        
+        status_bar = ctk.CTkFrame(
+            parent,
+            height=28,
             fg_color="#1E1E1E",
-            scrollbar_button_color="#4A4A4A",
-            scrollbar_button_hover_color="#7F8488"
+            border_width=1,
+            border_color="#3E3E42"
         )
-        self.updates_display.pack(expand=True, fill=BOTH, padx=5, pady=5)
-
-        # Status bar for the updates tab
-        self.updates_status_frame = ctk.CTkFrame(updates_main_frame, height=25, fg_color="#252526", corner_radius=0, border_width=1, border_color="#4A4A4A")
-        self.updates_status_frame.pack(side=BOTTOM, fill=X)
-        self.status_label = ctk.CTkLabel(self.updates_status_frame, textvariable=self.status_var, anchor="w", font=ctk.CTkFont(size=12), text_color="#A0A0A0")
-        self.status_label.pack(side=LEFT, fill=X, expand=True, padx=10)
-
-
-        # --- Conversation Tab ---
-        conversation_main_frame = ctk.CTkFrame(conversation_tab, fg_color="transparent")
-        conversation_main_frame.pack(expand=True, fill=BOTH)
-
-        # Create the status bar at the bottom of the conversation tab
-        self.conversation_status_frame = ctk.CTkFrame(conversation_main_frame, height=25, fg_color="#252526", corner_radius=0)
-        self.conversation_status_frame.pack(side=BOTTOM, fill=X)
-        self.conversation_status_label = ctk.CTkLabel(self.conversation_status_frame, textvariable=self.status_var, anchor="w", font=ctk.CTkFont(size=12), text_color="#A0A0A0")
-        self.conversation_status_label.pack(side=LEFT, fill=X, expand=True, padx=10)
-
-        self.conversation_display = ctk.CTkTextbox(
-            conversation_main_frame,
-            wrap=WORD,
-            state=DISABLED,
-            font=self.text_tags["default"]["font"], # type: ignore
-            fg_color="#1E1E1E", # Match main content background
-            scrollbar_button_color="#4A4A4A",
-            scrollbar_button_hover_color="#7F8488"
+        status_bar.pack(side="bottom", fill="x")
+        status_bar.pack_propagate(False)
+        
+        # Left side - Main status
+        left_frame = ctk.CTkFrame(status_bar, fg_color="transparent")
+        left_frame.pack(side="left", fill="both", expand=True, padx=5)
+        
+        self.status_icon = ctk.CTkLabel(
+            left_frame,
+            text="●",
+            text_color="#10B981",  # Green = ready
+            font=("Segoe UI", 14)
         )
-        self.conversation_display.pack(expand=True, fill=BOTH, padx=5, pady=5)
+        self.status_icon.pack(side="left", padx=5)
+        
+        self.status_text = ctk.CTkLabel(
+            left_frame,
+            textvariable=self.status_var, # Use the existing status variable
+            font=("Segoe UI", 12),
+            anchor="w"
+        )
+        self.status_text.pack(side="left", fill="x", expand=True)
+        
+        # Right side - Info badges
+        right_frame = ctk.CTkFrame(status_bar, fg_color="transparent")
+        right_frame.pack(side="right", padx=5)
+        
+        # Time elapsed
+        self.time_label = ctk.CTkLabel(
+            right_frame,
+            text="⏱️ 00:00", font=("Segoe UI", 11),
+            text_color="#9CA3AF"
+        )
+        self.time_label.pack(side="right", padx=5)
 
-        # Apply configured text tags to both widgets
-        for name, config in self.text_tags.items():
-            # CTkTextbox needs a modified config without the 'font' key
-            tag_specific_config_ctk = config.copy()
-            tag_specific_config_ctk.pop('font', None)
+        # Model indicator (will be updated dynamically)
+        self.model_badge_label = ctk.CTkLabel(
+            right_frame, text="🤖 No Model", font=("Segoe UI", 11),
+            fg_color="#6366F1", corner_radius=4, padx=8
+        )
+        self.model_badge_label.pack(side="right", padx=2)
+        
+        return status_bar
 
-            if self.conversation_display:
-                # CTkTextbox uses tag_config and the modified config
-                self.conversation_display.tag_config(name, **tag_specific_config_ctk)
+
 
     def _create_status_bar(self, parent_frame: ctk.CTkFrame):
         """Creates the status bar at the bottom of the window."""
@@ -555,9 +828,441 @@ class MainWindow:
         self.progress_bar.set(0) # Initialize to 0
         self.status_var.set("Select a project directory to begin.") # Initial status message
 
+    def _create_updates_tab(self, tab: ctk.CTkFrame):
+        """Creates the content for the 'Updates / Logs' tab."""
+        # Use a CTkScrollableFrame to allow embedding both text labels and command card widgets
+        self.updates_display = ctk.CTkScrollableFrame(
+            tab,
+            fg_color="#252526",
+            label_text="Updates / Logs"
+        )
+        self.updates_display.pack(fill="both", expand=True)
+
+    def _create_code_output_tab(self, tab: ctk.CTkFrame):
+        """Creates the content for the 'Code Output' tab."""
+        self.code_output_tab = tab
+
+        # --- NEW: Header frame for buttons ---
+        header_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        header_frame.pack(fill=X, padx=10, pady=(10, 0))
+
+        self.browse_files_button = ctk.CTkButton(
+            header_frame,
+            text="📁 Browse Files",
+            command=self._toggle_file_browser_view,
+            state=DISABLED
+        )
+        self.browse_files_button.pack(side=LEFT)
+        ToolTip(self.browse_files_button, "Toggle between viewing generated code and browsing all project files.")
+        
+        # --- NEW: Main frame to hold both conversation display and minimap ---
+        code_output_content_frame = ctk.CTkFrame(tab, fg_color="transparent")
+        code_output_content_frame.pack(expand=True, fill=BOTH, padx=10, pady=10)
+
+        # --- BUG FIX: Use CTkScrollableFrame instead of CTkTextbox ---
+        # This is the correct widget to hold multiple child widgets (our code blocks).
+        # The "embedding widgets is forbidden" error occurs when trying to pack
+        # complex frames into a Textbox.
+        self.conversation_display = ctk.CTkScrollableFrame(
+            code_output_content_frame,
+            fg_color="#000000"  # Pure black background
+        )
+        # The scrollable frame doesn't need the key binding for copy, as copy
+        # functionality is handled by buttons within each code block.
+        self.conversation_display.pack(fill="both", expand=True)
+
+    def _toggle_file_browser_view(self):
+        """Toggles the file browser mode on and off."""
+        self.is_browsing_files = not self.is_browsing_files
+
+        if not self.conversation_display or not self.browse_files_button:
+            return
+
+        # Clear all existing widgets from the scrollable frame
+        for widget in self.conversation_display.winfo_children():
+            widget.destroy()
+
+        if self.is_browsing_files:
+            self.browse_files_button.configure(text="📖 View Generated Code", fg_color="#0078D4")
+            self.status_var.set("Browsing project files...")
+            self._display_project_files()
+        else:
+            self.browse_files_button.configure(text="📁 Browse Files", fg_color=ctk.ThemeManager.theme["CTkButton"]["fg_color"]) # type: ignore
+            self.status_var.set("Viewing generated code...")
+            # The view will now be populated by new agent actions.
+
+    def _display_project_files(self):
+        """Scans the project directory and displays all file contents."""
+        if not self.file_system_manager or not self.conversation_display:
+            return
+
+        try:
+            all_files = self.file_system_manager.get_all_files_in_project()
+
+            # Add a header label to the scrollable frame
+            header_label = ctk.CTkLabel(self.conversation_display, text=f"📂 Project Files ({len(all_files)} files found)", font=("Segoe UI", 16, "bold"), anchor="w")
+            header_label.pack(fill=X, padx=10, pady=(5, 15))
+
+            for file_path in sorted(all_files):
+                try:
+                    content = self.file_system_manager.read_file(file_path)
+                    # --- BUG FIX: Handle .txt files correctly ---
+                    # Pygments uses 'text' for plain text files, not 'txt'.
+                    file_suffix = Path(file_path).suffix[1:]
+                    if file_suffix == 'txt':
+                        language = 'text'
+                    else:
+                        language = get_lexer_by_name(file_suffix).name.lower() if file_suffix else "text"
+
+                    self._create_modern_code_block(self.conversation_display, content, language=language, file_path=file_path)
+                except Exception as e:
+                    error_label = ctk.CTkLabel(self.conversation_display, text=f"--- Error reading {file_path} ---\n{e}\n\n", text_color="red")
+                    error_label.pack(fill=X, padx=10, pady=5)
+
+        except Exception as e:
+            logger.error(f"Failed to display project files: {e}")
+            error_label = ctk.CTkLabel(self.conversation_display, text=f"Error scanning project directory: {e}\n", text_color="red")
+            error_label.pack(fill=X, padx=10, pady=5)
+
+    def _create_notebook(self, parent_frame: ctk.CTkFrame):
+        """Creates the tabbed notebook for displaying updates/logs and conversation."""
+        self.notebook = ctk.CTkTabview(parent_frame, border_width=1, border_color="#4A4A4A", segmented_button_selected_color="#0078D4", fg_color="#1E1E1E")
+        self.notebook.pack(expand=True, fill=BOTH, padx=20, pady=(0, 0))
+
+        updates_tab = self.notebook.add("📊 Updates / Logs")
+        self._create_updates_tab(updates_tab)
+        self._create_code_output_tab(self.notebook.add("📄 Code Output"))
+        
+        # --- NEW: Add the split view tab ---
+        diff_tab = self.notebook.add("↔️ Code Diff")
+        self.left_diff_text, self.right_diff_text = self._create_split_view(diff_tab)
+
+    def _create_split_view(self, parent):
+        """Create split view for comparing code versions"""
+        
+        split_container = ctk.CTkFrame(parent, fg_color="#1E1E1E")
+        split_container.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Left pane (Original)
+        left_pane = ctk.CTkFrame(split_container, fg_color="#252526", border_width=1, border_color="#4A4A4A")
+        left_pane.pack(side="left", fill="both", expand=True, padx=(0, 2))
+        
+        left_label = ctk.CTkLabel(
+            left_pane, text="📄 Original", font=("Segoe UI", 13, "bold"),
+            fg_color="#3E3E42", height=30, anchor="w", padx=10
+        )
+        left_label.pack(fill="x")
+        
+        left_text = ctk.CTkTextbox(left_pane, font=("Consolas", 14, "bold"), wrap="none")
+        left_text.pack(fill="both", expand=True, padx=1, pady=1)
+        
+        # Right pane (Modified)
+        right_pane = ctk.CTkFrame(split_container, fg_color="#252526", border_width=1, border_color="#4A4A4A")
+        right_pane.pack(side="right", fill="both", expand=True, padx=(2, 0))
+        
+        right_label = ctk.CTkLabel(
+            right_pane, text="✏️ Modified", font=("Segoe UI", 13, "bold"),
+            fg_color="#3E3E42", height=30, anchor="w", padx=10
+        )
+        right_label.pack(fill="x")
+        
+        right_text = ctk.CTkTextbox(right_pane, font=("Consolas", 14, "bold"), wrap="none")
+        right_text.pack(fill="both", expand=True, padx=1, pady=1)
+        
+        # --- NEW: Configure tags for diff highlighting ---
+        left_text.tag_config("diff_delete", background="#5A2D2D")
+        right_text.tag_config("diff_add", background="#1A4A3A")
+        # --- NEW: Configure tags for syntax highlighting ---
+        left_text.tag_config("syntax_keyword", foreground="#f92672")
+        left_text.tag_config("syntax_string", foreground="#e6db74")
+        left_text.tag_config("syntax_comment", foreground="#75715e")
+        right_text.tag_config("syntax_keyword", foreground="#f92672")
+        right_text.tag_config("syntax_string", foreground="#e6db74")
+        right_text.tag_config("syntax_comment", foreground="#75715e")
+        right_text.tag_config("syntax_number", foreground="#ae81ff")
+        right_text.tag_config("syntax_function", foreground="#a6e22e")
+        # --- END NEW ---
+
+        return left_text, right_text
+
+    def _display_diff_with_highlighting(self, original_content: str, modified_content: str):
+        """
+        Calculates a line-by-line diff and displays it in the split view
+        with added/removed lines highlighted. It also applies syntax highlighting.
+        """
+        if not self.left_diff_text or not self.right_diff_text:
+            return
+
+        # --- Clear previous content ---
+        self.left_diff_text.configure(state="normal")
+        self.right_diff_text.configure(state="normal")
+        self.left_diff_text.delete("1.0", "end")
+        self.right_diff_text.delete("1.0", "end")
+
+        # --- Determine language for syntax highlighting ---
+        try:
+            lexer = guess_lexer(modified_content or original_content)
+            language = lexer.aliases[0]
+        except Exception:
+            language = "text"
+
+        # --- Use difflib for line-by-line comparison ---
+        diff = difflib.ndiff(original_content.splitlines(), modified_content.splitlines())
+
+        original_lines = []
+        modified_lines = []
+
+        for line in diff:
+            code = line[2:] + '\n'
+            if line.startswith('+ '):
+                # Line added to modified version
+                original_lines.append(('\n', None)) # Add a blank line to original for alignment
+                modified_lines.append((code, 'diff_add'))
+            elif line.startswith('- '):
+                # Line removed from original version
+                original_lines.append((code, 'diff_delete'))
+                modified_lines.append(('\n', None)) # Add a blank line to modified for alignment
+            elif line.startswith('  '):
+                # Line is unchanged
+                original_lines.append((code, None))
+                modified_lines.append((code, None))
+            # Ignore '? ' lines which are informational diff lines
+
+        # --- Render content with syntax and diff highlighting ---
+        self._render_highlighted_lines(self.left_diff_text, original_lines, language)
+        self._render_highlighted_lines(self.right_diff_text, modified_lines, language)
+
+        self.left_diff_text.configure(state="disabled")
+        self.right_diff_text.configure(state="disabled")
+
+    def _render_highlighted_lines(self, widget: ctk.CTkTextbox, lines: List[Tuple[str, Optional[str]]], language: str):
+        """
+        Renders lines into a widget, applying a background tag for the whole line
+        and then applying syntax highlighting on top.
+        """
+        for line_content, background_tag in lines:
+            start_index = widget.index("end-1c")
+            widget.insert("end", line_content)
+            end_index = widget.index("end-1c")
+
+            # Apply the background diff tag to the entire line first
+            if background_tag:
+                widget.tag_add(background_tag, start_index, end_index)
+
+            # --- NEW: Apply syntax highlighting on top of the background ---
+            self._apply_syntax_highlighting_to_range(widget, start_index, end_index, line_content, language)
+
+    def _apply_syntax_highlighting_to_range(self, widget: ctk.CTkTextbox, start_index: str, end_index: str, code: str, language: str):
+        """Applies pygments-based syntax highlighting to a specific range in a CTkTextbox."""
+        try:
+            lexer = get_lexer_by_name(language, stripall=True)
+        except Exception:
+            lexer = TextLexer() # Fallback for unknown languages
+
+        # Define a mapping from Pygments token types to our custom Tkinter tags
+        from pygments.token import Keyword, Name, String, Comment, Number, Operator, Punctuation
+        token_to_tag = {
+            Keyword: "syntax_keyword",
+            String: "syntax_string",
+            Comment: "syntax_comment",
+            Number: "syntax_number",
+            Name.Function: "syntax_function",
+            Name.Class: "syntax_class",
+            Name.Builtin: "syntax_builtin",
+            Operator: "syntax_operator",
+            Punctuation: "syntax_operator",
+        }
+
+        # Tokenize the line of code
+        tokens = lex(code, lexer)
+
+        # Iterate through tokens and apply tags
+        current_pos = 0
+        for ttype, tvalue in tokens:
+            tag = None
+            # Find the most specific tag for the token type
+            for token_class, tag_name in token_to_tag.items():
+                if ttype in token_class:
+                    tag = tag_name
+                    break
+            if tag:
+                widget.tag_add(tag, f"{start_index}+{current_pos}c", f"{start_index}+{current_pos + len(tvalue)}c")
+            current_pos += len(tvalue)
+
+    # --- NEW: Keyboard Shortcuts and Helper Methods ---
+    def setup_keyboard_shortcuts(self):
+        """Setup intuitive keyboard shortcuts for common actions."""
+        
+        shortcuts = {
+            "<Control-n>": self.handle_start_workflow,
+            "<F5>": self.handle_start_workflow,
+            "<Control-s>": self.save_project_state,
+            "<Control-w>": self.clear_output,
+            "<Control-l>": lambda: self.notebook.set("📊 Updates / Logs") if self.notebook else None,
+            "<Control-o>": lambda: self.notebook.set("📄 Code Output") if self.notebook else None,
+            "<Escape>": self.handle_stop_workflow
+        }
+        
+        for key, func in shortcuts.items():
+            # Use a lambda to capture the current function `f` in the loop
+            self.master.bind(key, lambda e, f=func: f())
+        logger.info("Keyboard shortcuts initialized.")
+
+    def save_project_state(self):
+        """Saves the current project state via the WorkflowManager."""
+        if self.workflow_manager_instance and not self.is_running:
+            try:
+                self.workflow_manager_instance.save_current_project_state()
+                self.status_var.set("Project state saved successfully.")
+                logger.info("Project state saved via keyboard shortcut.")
+            except Exception as e:
+                self.status_var.set("Error saving project state.")
+                logger.error(f"Failed to save project state via shortcut: {e}")
+        elif self.is_running:
+            logger.warning("Attempted to save project state while a task is running. Ignoring.")
+        else:
+            logger.warning("Attempted to save project state, but workflow manager is not initialized.")
+
+    def clear_output(self):
+        """Clears the main code output display."""
+        if self.conversation_display and self.conversation_display.winfo_exists():
+            self.conversation_display.configure(state="normal")
+            self.conversation_display.delete("1.0", "end")
+            self.conversation_display.configure(state="disabled")
+            logger.info("Code output cleared via keyboard shortcut.")
+
+    def toggle_full_code_view(self, codetextbox: ctk.CTkTextbox, 
+                             button: ctk.CTkButton,
+                             line_count: int):
+        """
+        Toggles between limited height and full code view.
+        """
+        current_text = button.cget("text")
+        
+        if current_text == "Show Full Code":
+            # Expand
+            font_line_height = 18 # Approximation for Consolas 11 + padding
+            new_height = line_count * font_line_height
+            
+            # Set a max height to avoid performance issues with huge files
+            max_height = self.master.winfo_height() * 0.8 
+            if new_height > max_height:
+                new_height = int(max_height)
+
+            # But don't make it smaller than the original collapsed height
+            if new_height < 300:
+                new_height = 300
+
+            codetextbox.configure(height=new_height)
+            button.configure(text="Hide Full Code")
+        else:
+            # Collapse
+            codetextbox.configure(height=300)
+            button.configure(text="Show Full Code")
+
+
+    # --- NEW: Command Palette and its actions ---
+    def create_command_palette(self):
+        """Create a quick command palette overlay"""
+        
+        # Overlay background
+        overlay = ctk.CTkFrame(
+            self.master,
+            fg_color=("#000000", "#000000"),
+            corner_radius=0
+        )
+        overlay.configure(fg_color=overlay.cget("fg_color") + (0.7,)) # Add alpha
+        overlay.place(relx=0, rely=0, relwidth=1, relheight=1)
+        overlay.lift()
+        
+        # Command palette window
+        palette = ctk.CTkFrame(
+            overlay,
+            fg_color="#1E1E1E",
+            border_width=2,
+            border_color="#6366F1",
+            corner_radius=10,
+            width=600,
+            height=400
+        )
+        palette.place(relx=0.5, rely=0.3, anchor="center")
+        
+        # Search input
+        search_var = ctk.StringVar()
+        search_entry = ctk.CTkEntry(
+            palette,
+            placeholder_text="Type a command...",
+            textvariable=search_var,
+            height=40,
+            font=("Segoe UI", 15),
+            fg_color="#252526",
+            border_width=0
+        )
+        search_entry.pack(fill="x", padx=10, pady=10)
+        search_entry.focus()
+        
+        # Commands list
+        commands_list = [
+            ("▶️ Start / Continue Agent", self.handle_start_workflow),
+            ("⏹️ Stop Agent", self.handle_stop_workflow),
+            ("🗑️ Clear Output", lambda: self.conversation_display.delete("1.0", "end") if self.conversation_display else None),
+            ("💾 Export Logs", self._export_logs),
+            ("📁 Open Project Folder", self.open_project_folder),
+            ("🔑 Change API Key", self._change_api_key_manual),
+            ("📊 View Project State", self.view_project_state)
+        ]
+        
+        scrollable = ctk.CTkScrollableFrame(palette, fg_color="transparent")
+        scrollable.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        for cmd_text, cmd_func in commands_list:
+            btn = ctk.CTkButton(
+                scrollable,
+                text=cmd_text,
+                anchor="w",
+                height=35,
+                fg_color="transparent",
+                hover_color="#313244",
+                command=lambda f=cmd_func: [overlay.destroy(), f()]
+            )
+            btn.pack(fill="x", pady=2)
+        
+        # Close on Escape or click outside
+        overlay.bind("<Escape>", lambda e: overlay.destroy())
+        overlay.bind("<Button-1>", lambda e: overlay.destroy())
+        palette.bind("<Button-1>", lambda e: "break")  # Don't propagate to overlay
+
+    def open_project_folder(self):
+        """Opens the current project directory in the default file explorer."""
+        if self.project_root and os.path.isdir(self.project_root):
+            try:
+                if platform.system() == "Windows":
+                    os.startfile(self.project_root)
+                elif platform.system() == "Darwin": # macOS
+                    subprocess.run(["open", self.project_root])
+                else: # Linux
+                    subprocess.run(["xdg-open", self.project_root])
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not open project folder: {e}", parent=self.master)
+        else:
+            messagebox.showwarning("No Project", "Please select a project directory first.", parent=self.master)
+
+    def view_project_state(self):
+        """Displays the current project state JSON in a message box."""
+        if self.workflow_manager_instance and self.workflow_manager_instance.project_state:
+            state_json = self.workflow_manager_instance.project_state.model_dump_json(indent=2)
+            # This might be too large for a messagebox. A dedicated window would be better.
+            # For now, we'll show a snippet.
+            messagebox.showinfo("Project State", state_json[:2000] + "...", parent=self.master)
+        else:
+            messagebox.showwarning("No State", "Project state is not available.", parent=self.master)
+
     def _set_ui_initial_state(self):
         """Disables all interactive UI controls that require a project to be loaded."""
-        """Sets the initial disabled state for controls before project selection."""
+        """
+        Sets the initial disabled state for controls before project selection.
+        The project selection button itself must remain enabled.
+        """
         if self.select_project_button: self.select_project_button.configure(state=NORMAL)
         if self.framework_dropdown: self.framework_dropdown.configure(state=DISABLED)
         if self.new_project_check: self.new_project_check.configure(state=DISABLED)
@@ -568,6 +1273,7 @@ class MainWindow:
         if self.model_dropdown: self.model_dropdown.configure(state=DISABLED)
         if self.tars_temp_scale: self.tars_temp_scale.configure(state=DISABLED)
         if self.case_temp_scale: self.case_temp_scale.configure(state=DISABLED)
+        if self.change_api_key_button: self.change_api_key_button.configure(state=DISABLED)
 
     def _set_ui_project_selected_state(self):
         """Enables UI controls after a project directory is selected and basic configs are loaded."""
@@ -578,9 +1284,12 @@ class MainWindow:
         if self.framework_dropdown: self.framework_dropdown.configure(state=fw_state)
         if self.new_project_check: self.new_project_check.configure(state=NORMAL)
         if self.provider_dropdown: self.provider_dropdown.configure(state="readonly")
+        if self.browse_files_button: self.browse_files_button.configure(state=NORMAL)
+
         if self.model_dropdown: self.model_dropdown.configure(state="readonly")
         if self.tars_temp_scale: self.tars_temp_scale.configure(state=NORMAL)
         if self.case_temp_scale: self.case_temp_scale.configure(state=NORMAL)
+        if self.change_api_key_button: self.change_api_key_button.configure(state=NORMAL)
         # Send button enabled only after stage 2 init is complete
         if self.send_button: self.send_button.configure(state=DISABLED) # Keep disabled until stage 2 finishes
 
@@ -618,7 +1327,8 @@ class MainWindow:
             # Pass the UI callback for command confirmation directly
             self.command_executor = CommandExecutor(
                 project_root_path=self.project_root,
-                confirmation_cb=self._request_confirmation_dialog_from_thread
+                confirmation_cb=self._request_confirmation_dialog_from_thread,
+                stop_event=self.stop_event_thread
             )
 
             # --- Load Providers and Models ---
@@ -636,14 +1346,26 @@ class MainWindow:
                 logger.info(f"Loaded UI prefs from state: Provider='{saved_provider_id}', Model='{saved_model_id}'")
             else:
                 logger.info("Using default provider 'All' (no preferences found in state).")
+            
+            # --- FIX: Temporarily disconnect callbacks to prevent premature firing ---
+            if self.provider_dropdown: self.provider_dropdown.configure(command=None)
+            if self.model_dropdown: self.model_dropdown.configure(command=None)
+            
+            try:
+                # Set provider dropdown and trigger model list update
+                self.provider_var.set(providers.get(saved_provider_id, "All"))
+                self._update_model_list(saved_provider_id)
 
-            # Set provider dropdown and trigger model list update
-            self.provider_var.set(providers.get(saved_provider_id, "All"))
-            self._update_model_list(saved_provider_id)
-
-            # Set the saved model if it's in the newly populated list
-            if saved_model_id and any(m['id'] == saved_model_id for m in MODEL_DATA):
-                self.model_var.set(next(m['display'] for m in MODEL_DATA if m['id'] == saved_model_id))
+                # Set the saved model if it's in the newly populated list
+                if saved_model_id and any(m['id'] == saved_model_id for m in MODEL_DATA):
+                    self.model_var.set(next(m['display'] for m in MODEL_DATA if m['id'] == saved_model_id))
+                elif MODEL_DATA:
+                    # If saved model not found, default to the first in the list
+                    self.model_var.set(MODEL_DATA[0]['display'])
+            finally:
+                # --- FIX: Reconnect callbacks after programmatic changes ---
+                if self.provider_dropdown: self.provider_dropdown.configure(command=self.on_provider_selected)
+                if self.model_dropdown: self.model_dropdown.configure(command=self.on_model_selected)
 
             # --- Load Available Frameworks ---
             self.available_frameworks = self.config_manager.get_available_frameworks()
@@ -676,9 +1398,9 @@ class MainWindow:
             # --- FIX: Automatically trigger Stage 2 if a model is already selected from state ---
             if self.model_var.get():
                 logger.info("Valid model loaded from state. Automatically proceeding to Stage 2 initialization.")
-                # Use 'after' to allow the UI to update before starting the next stage.
+                # Use 'after' to allow the UI to update before starting the next, potentially blocking, stage.
                 self.master.after(50, self._initialize_core_stage2)
-            else:
+            elif self.project_root: # Only show this if a project is actually loaded
                 self.status_var.set("Project loaded. Please select a model to initialize agents.")
 
         except (ValueError, RuntimeError, ImportError, FileNotFoundError, NotADirectoryError, Exception) as e:
@@ -693,6 +1415,20 @@ class MainWindow:
             self.status_var.set("Initialization Error (Stage 1). Check logs.")
             self._set_ui_initial_state()
             self._set_ui_running_state(False)
+
+    def _set_dialog_icon(self, dialog_window: tk.Toplevel):
+        """
+        Sets the application icon on a given Toplevel window (dialog).
+        This ensures consistent branding across all pop-ups.
+        """
+        try:
+            # The self.logo_photo_image is created during main window icon setup.
+            # If it exists, we can reuse it for dialogs.
+            if self.logo_photo_image and hasattr(dialog_window, 'iconphoto'):
+                dialog_window.iconphoto(True, self.logo_photo_image)
+        except Exception as e:
+            logger.warning(f"Could not set icon on dialog window: {e}")
+
         finally:
             self.is_initializing_stage1 = False # Unset the flag after setup is complete
 
@@ -758,7 +1494,7 @@ class MainWindow:
                 request_command_execution_cb=self._request_command_execution_from_thread, # Pass command exec callback
                 show_user_action_prompt_cb=self._request_user_action_dialog_from_thread, # type: ignore
                 request_network_retry_cb=self._request_network_retry_dialog_from_thread, # Pass new callback
-                request_remediation_retry_cb=self._request_remediation_retry_from_thread, # New callback for remediation retry
+                request_api_key_update_cb=self._request_api_key_update_dialog_from_thread, # Pass API key update callback
                 default_tars_temperature=self.tars_temp_var.get(), # Pass UI temperature
                 default_case_temperature=self.case_temp_var.get(),  # Pass UI temperature
                 ui_communicator=self.ui_communicator,
@@ -768,17 +1504,70 @@ class MainWindow:
                     else None
                 )
             )
-            self.progress_var.set(30)
 
-            # Initialization complete
-            self.core_components_initialized = True
-            self.needs_initialization = True # Workflow manager created, needs project init run
-            project_name = Path(self.project_root).name
+            
+            # --- DEFINITIVE FIX: Explicitly load state into WorkflowManager ---
+            self.workflow_manager_instance.load_existing_project()
+            # --- DEFINITIVE FIX: Save the newly created state to disk immediately ---
+            # This ensures that if the user changes the model before starting, the state file exists.
+            if self.workflow_manager_instance.project_state:
+                self.memory_manager.save_project_state(self.workflow_manager_instance.project_state)
+            
+            # ✅ CORRUPTION DETECTION: Check if the loaded state is suspiciously empty
+            if self.project_root and self.workflow_manager_instance.project_state:
+                state = self.workflow_manager_instance.project_state
+                # A simple check for code existence (e.g., manage.py)
+                has_code = os.path.exists(os.path.join(self.project_root, "manage.py"))
+                state_is_empty = not state.features and not state.registered_apps and not state.defined_models
+
+                if has_code and state_is_empty:
+                    logger.error("UI DETECTED POTENTIAL STATE CORRUPTION: Empty state loaded for a project with code.")
+                    # Create a temporary Toplevel to get a handle for setting the icon
+                    temp_dialog_parent = tk.Toplevel(self.master)
+                    temp_dialog_parent.withdraw() # Hide the temporary window
+                    response = messagebox.askyesno( # type: ignore
+                        "Potential State Corruption",
+                        "Warning: The project's saved state appears to be empty, but code files were found.\n\n"
+                        "This can happen if the state file was corrupted. Would you like to attempt to restore from the most recent backup?\n\n"
+                        "(Choosing 'No' will proceed with the empty state, potentially losing history.)",
+                        parent=self.master
+                    )
+                    if response and self.memory_manager:
+                        self._set_dialog_icon(temp_dialog_parent)
+                        temp_dialog_parent.destroy()
+                        restored = self.memory_manager.restore_from_latest_backup()
+                        if restored and restored.features:
+                            self.workflow_manager_instance.project_state = restored
+                            self.add_message("System", f"Successfully restored {len(restored.features)} features from backup.")
+                        else:
+                            self.add_message("System", "Could not restore from backup. The project state may be lost.")
+                            messagebox.showwarning("Restore Failed", "No valid backup could be found.", parent=self.master)
+                    else:
+                        # Ensure the temporary window is destroyed if 'No' is clicked
+                        temp_dialog_parent.destroy()
+
+            project_name = Path(self.project_root).name # type: ignore
             self.project_path_var.set(f"{project_name} ({self.project_root})")
             logger.info(f"Core components Stage 2 initialized successfully for project: {project_name}")
             self.add_message("System", f"Project '{project_name}' loaded. Framework: {self.framework_var.get()}. Ready for prompts.")
+
+            # Initialization complete
+            self.core_components_initialized = True
+            self.needs_initialization = False # Workflow manager is created and ready.
             self.status_var.set(f"Project: {project_name} | Ready")
-            if self.send_button: self.send_button.configure(state=NORMAL) # Enable Start button
+ 
+            # ✅ FIX: If we can continue, add a helpful message to the user.
+            if self.is_continuing_run and self.memory_manager:
+                loaded_state = self.memory_manager.load_project_state()
+                if loaded_state and loaded_state.current_feature_id and (current_feature := loaded_state.get_feature_by_id(loaded_state.current_feature_id)):
+                    self.add_message("System", f"🚀 Project loaded. Press 'Continue' to resume work on '{current_feature.name}'.")
+                elif loaded_state and self.workflow_manager_instance.can_continue():
+                    self.add_message("System", "Project loaded with features ready to continue. Press 'Continue' to resume work.")
+            
+            # ✅ FIX: Check for continuable state AFTER all loading and potential restoration is complete.
+            self._update_continue_state()
+            # This second call ensures the button state is refreshed based on the final `is_continuing_run` value.
+            self._set_ui_running_state(False) # This will now correctly set the "Continue" button
 
         except (ValueError, RuntimeError, ImportError, AuthenticationError, RateLimitError, Exception) as e:
             # Handle errors during AgentManager or WorkflowManager initialization
@@ -787,15 +1576,12 @@ class MainWindow:
             self.core_components_initialized = False
             self.workflow_manager_instance = None
             self.agent_manager = None
-            self.status_var.set("Initialization Error (Stage 2). Check logs.")
-            # Keep UI disabled if stage 2 fails
-
-
-
+            self.status_var.set("Initialization Error (Stage 2). Check logs.") # type: ignore
             self._set_ui_initial_state()
         finally:
-            # Ensure UI is unlocked regardless of success/failure in stage 2
-            self._set_ui_running_state(False)
+            # The logic has been moved into the `try` block to ensure it only runs on successful initialization.
+            # The `except` block now handles setting the UI state on failure.
+            pass
 
     def select_project_directory(self):
         """
@@ -819,42 +1605,57 @@ class MainWindow:
             self.project_root = directory # Store the selected path
             self.project_path_var.set(f"{Path(directory).name}")
 
+            # Auto-detect if it's an existing project and update the checkbox
+            project_state_path = Path(directory) / ".vebgen" / "project_state.json" # type: ignore
+            is_existing = project_state_path.exists()
+            self.is_new_project.set(not is_existing)
+            logger.info(f"Project auto-detected as {'existing' if is_existing else 'new'}. 'New Project' checkbox set to {not is_existing}.")
+            # CRITICAL FIX: Reset continue state to allow prompt entry for new/re-loaded projects.
+            self.is_continuing_run = False
             # --- Clear previous displays and reset progress ---
             # Clear the updates display (CTkScrollableFrame) by destroying its children
-            if self.updates_display and self.updates_display.winfo_exists():
-                try:
-                    for widget in self.updates_display.winfo_children():
-                        widget.destroy()
-                except tk.TclError: pass # Ignore if widget destroyed
-
-            # Clear the conversation display (CTkTextbox)
-            if self.conversation_display and self.conversation_display.winfo_exists():
-                try:
-                    self.conversation_display.configure(state=NORMAL)
-                    self.conversation_display.delete('0.0', END)
-                    self.conversation_display.configure(state=DISABLED)
-                except tk.TclError: pass # Ignore if widget destroyed
+            # Destroy the entire notebook and recreate it. This is the safest way
+            # to ensure all child widgets and their pending `after` jobs are gone.
+            if self.notebook and self.notebook.winfo_exists():
+                self.notebook.destroy()
+            self._create_notebook(self.main_content_frame) # type: ignore
             self.progress_var.set(0)
             self.status_var.set("Initializing...")
             self._set_ui_running_state(True) # Lock UI during initialization
+            self.is_continuing_run = False # Reset continue flag on new project selection
             self.needs_initialization = True # Flag that next run needs full initialization
 
-            # Start the two-stage initialization process
-            self.master.after(50, self._initialize_core_stage1)
+            # --- FIX: Run the entire initialization in a background thread ---
+            # This prevents the UI from freezing during agent setup or key prompts.
+            init_thread = threading.Thread(target=self._run_initialization_thread, daemon=True)
+            init_thread.start()
+            # --- END FIX ---
         else:
             logger.info("Project directory selection cancelled.")
             # Update status only if core components weren't already initialized
             if not self.project_root:
                 self.status_var.set("Project selection cancelled. Please select a directory.")
 
+    def _run_initialization_thread(self):
+        """
+        Target for a background thread to run the entire two-stage initialization
+        process without blocking the UI.
+        """
+        try:
+            # Stage 1 is quick and reads configs.
+            self._initialize_core_stage1()
+            # Stage 2 can be slow (API key prompts, agent init) and is now safely off the main thread.
+            self._initialize_core_stage2()
+        except Exception as e:
+            logger.exception("An error occurred during the background initialization thread.")
+            self.update_progress_safe({"error": f"Initialization failed: {e}"})
+        finally:
+            # Ensure the UI is unlocked, even if initialization fails.
+            self.update_progress_safe({"finalize": True, "success": self.core_components_initialized})
+
     def _update_model_list(self, provider_id: str):
-        """Updates the model dropdown list based on the selected provider."""
         """Helper to update the model dropdown based on the selected provider."""
-        if getattr(self, 'is_initializing_stage1', False):
-            logger.debug("Skipping model list update during Stage 1 initialization to prevent event loops.")
         global MODEL_DATA
-        if not self.config_manager or not self.model_dropdown:
-            return
         self.model_var.set("") # Clear previous selection
         MODEL_DATA = self.config_manager.get_models_for_provider(provider_id)
         model_display_names = [m['display'] for m in MODEL_DATA]
@@ -866,6 +1667,10 @@ class MainWindow:
         else: # No models for this provider
             self.model_var.set("")
             self.model_dropdown.configure(state=DISABLED)
+
+        # Update the model badge in the status bar
+        if self.model_badge_label:
+            self.model_badge_label.configure(text=f"🤖 {self.model_var.get().split(' - ')[0]}")
 
     def _get_selected_provider_id(self) -> str:
         """Helper to get the internal ID of the currently selected provider from its display name."""
@@ -900,7 +1705,10 @@ class MainWindow:
 
         if selected_framework in ["flask", "node", "react"]:
             messagebox.showinfo(
-                "Coming Soon",
+                "Coming Soon", # type: ignore
+                # This is a simple dialog, but we can still try to set the icon
+                # by creating a temporary parent and setting its icon.
+                # However, for a simple info box, this might be overkill. Let's focus on the main ones.
                 f"Support for the '{selected_framework}' framework is coming soon!",
                 parent=self.master
             )
@@ -941,13 +1749,7 @@ class MainWindow:
         Callback when a model selection changes.
         Saves the preference and triggers agent/workflow initialization or re-initialization.
         """
-        # Prevent this from running during the initial project loading phase
-        if getattr(self, 'is_initializing_stage1', False):
-            return
-        # Stage 1 must be complete before a model can be selected.
-        if not self.memory_manager or not self.config_manager:
-            logger.warning("Cannot handle model selection: Core components (Stage 1) not initialized.")
-            return
+        # --- DEFINITIVE FIX: This guard clause prevents this method from running during the automatic setup process. ---
         if self.is_running:
             logger.warning("Attempted to change model while task is running. Ignoring.")
             return
@@ -965,23 +1767,28 @@ class MainWindow:
         logger.info(f"Model selection changed: Provider='{selected_provider_id}', Model='{selected_model_id}'")
 
         # --- Save Preferences ---
-        project_state_model = self.memory_manager.load_project_state()
-        if project_state_model:
-            if project_state_model.placeholders is None:
-                project_state_model.placeholders = {}
-            project_state_model.placeholders[UI_PREF_PROVIDER] = selected_provider_id
-            project_state_model.placeholders[UI_PREF_MODEL] = selected_model_id
-            try:
-                self.memory_manager.save_project_state(project_state_model)
-                logger.info("Saved updated model preferences to project state.")
-            except Exception as e:
-                logger.error(f"Failed to save model preferences to project state: {e}")
-        else:
-            logger.warning("Cannot save model preferences: Project state not loaded/available yet.")
+        if self.memory_manager:
+            project_state_model = self.memory_manager.load_project_state()
+            if project_state_model:
+                if project_state_model.placeholders is None:
+                    project_state_model.placeholders = {}
+                project_state_model.placeholders[UI_PREF_PROVIDER] = selected_provider_id
+                project_state_model.placeholders[UI_PREF_MODEL] = selected_model_id
+                try:
+                    self.memory_manager.save_project_state(project_state_model)
+                    logger.info("Saved updated model preferences to project state.")
+                except Exception as e:
+                    logger.error(f"Failed to save model preferences to project state: {e}")
+            else:
+                logger.warning("Cannot save model preferences: Project state not loaded/available yet.")
 
         # --- Re-initialize Agents and Workflow ---
         if self.agent_manager:
             self.status_var.set("Re-initializing agents with new models...")
+            # Update model badge in status bar
+            if self.model_badge_label:
+                self.model_badge_label.configure(text=f"🤖 {selected_model_details['display'].split(' - ')[0]}")
+
             self._set_ui_running_state(True) # Lock UI during re-initialization
             self.master.update_idletasks()
             try:
@@ -1008,42 +1815,72 @@ class MainWindow:
                         show_confirmation_dialog_cb=self._request_confirmation_dialog_from_thread,
                         request_command_execution_cb=self._request_command_execution_from_thread,
                         show_user_action_prompt_cb=self._request_user_action_dialog_from_thread, # type: ignore
-                        default_tars_temperature=self.tars_temp_var.get(), # Pass UI temperature
-                        request_remediation_retry_cb=self._request_remediation_retry_from_thread, # New callback for remediation retry
+                        request_network_retry_cb=self._request_network_retry_dialog_from_thread,
+                        request_api_key_update_cb=self._request_api_key_update_dialog_from_thread,
+                        default_tars_temperature=self.tars_temp_var.get(),
                         default_case_temperature=self.case_temp_var.get(),  # Pass UI temperature
-                        remediation_config=remediation_config_from_state
+                        remediation_config=remediation_config_from_state,
+                        ui_communicator=self.ui_communicator
                     )
-                    self.needs_initialization = True # Flag that workflow manager was recreated
+                    # --- DEFINITIVE FIX: Reload state into the newly created instance ---
+                    self.workflow_manager_instance.load_existing_project()
+                    # --- END FIX ---
+
+                    # self.needs_initialization = True # This was causing a state conflict. It's correctly set to False after Stage 2 init.
                     self.status_var.set("Agent re-initialized. Ready.")
                     self.add_message("System", f"Agent re-initialized. Provider: {selected_provider_id}, Model: {selected_model_id}")
+                    
+                    # ✅ FIX: Unlock UI after successful re-initialization
+                    self._set_ui_running_state(False)
                 else:
                     # This shouldn't happen if core components were initialized correctly before
                     raise RuntimeError("Core components missing, cannot recreate WorkflowManager.")
             except (ValueError, RuntimeError, AuthenticationError, RateLimitError, Exception) as e:
                 # Handle errors during re-initialization (e.g., invalid API key for new model)
-                logger.error(f"Failed to re-initialize agents/workflow after model change: {e}")
+                logger.error(f"Failed to re-initialize agents/workflow after model change: {e}") # type: ignore
+                # Create a temporary Toplevel to set the icon on the error dialog
+                temp_dialog_parent = tk.Toplevel(self.master)
+                temp_dialog_parent.withdraw()
                 messagebox.showerror("Agent Error", f"Failed to re-initialize agents:\n{e}\n\nCheck keys/models or restart.", parent=self.master)
                 self.status_var.set("Agent re-initialization failed.") # type: ignore
-                if self.send_button: self.send_button.configure(state=DISABLED) # Disable start if agents failed
-            finally:
-                # Unlock UI after re-initialization attempt
+                # Unlock UI on failure
                 self._set_ui_running_state(False)
+                if self.send_button: self.send_button.configure(state=DISABLED) # Disable start if agents failed
         else:
-            # This is the first time a model is selected, trigger Stage 2 initialization
-            logger.info("First model selected. Triggering core components Stage 2 initialization.")
-            self.status_var.set("Initializing agents and workflow (Stage 2)...")
-            self._set_ui_running_state(True) # Lock UI during init
-            # Schedule Stage 2 initialization to run after the UI has a chance to update.
-            self.master.after(50, self._initialize_core_stage2)
+            # This is the first time a model is selected by the user, trigger Stage 2 initialization
+            logger.info("First user model selection. Triggering core components Stage 2 initialization.")
+            self._initialize_core_stage2()
 
-    def handle_send_prompt(self, event=None):
+    def handle_start_stop_continue(self, event=None):
+        """
+        Central handler for the main action button.
+        Dispatches to start, stop, or continue the workflow based on current state.
+        """
+        if self.is_running:
+            self.handle_stop_workflow()
+        else:
+            self.handle_start_workflow()
+
+    def handle_stop_workflow(self):
+        """
+        Handles the 'Stop' button click. Signals the backend workflow to stop gracefully.
+        """
+        if not self.is_running or not self.workflow_manager_instance:
+            return
+
+        logger.info("Stop button clicked. Requesting graceful shutdown of workflow...")
+        self.status_var.set("Stopping workflow...")
+        self.workflow_manager_instance.request_stop()
+        # The UI will be fully unlocked and updated in _finalize_run_ui when the thread confirms exit.
+
+    def handle_start_workflow(self, event=None):
         """
         Handles the 'Start' button click or Enter key press in the prompt entry.
         It validates all necessary inputs and configurations are ready, then starts
         the appropriate workflow (initial or subsequent) in a background thread.
         """
         """
-        Handles the 'Start' button click or Enter key press in the prompt entry.
+        Handles the 'Start' or 'Continue' button click.
         Validates input and starts the appropriate workflow in a background thread.
         """
         if self.is_running:
@@ -1051,11 +1888,17 @@ class MainWindow:
             return
 
         # --- Input Validation ---
-        user_prompt = ""
-        if self.prompt_entry: user_prompt = self.prompt_entry.get().strip()
-        if not user_prompt:
+        user_prompt = self.prompt_entry.get().strip() if self.prompt_entry else ""
+        # --- FIX: Explicitly check the button's purpose ---
+        # This makes the logic robust against any race conditions with the is_continuing_run flag.
+        is_continue_button_press = self.send_button.cget("text") == "▶️ Continue"
+ 
+        # A prompt is NOT required if we are continuing a run.
+        if not user_prompt and not self.is_continuing_run and not is_continue_button_press:
             messagebox.showwarning("Input Required", "Please enter a prompt describing your goal.", parent=self.master)
             return
+        if user_prompt and self.is_continuing_run:
+            logger.warning("A new prompt was entered, but continuing a previous run. The new prompt will be ignored for now.")
 
         selected_framework = self.framework_var.get()
         if not selected_framework:
@@ -1076,26 +1919,37 @@ class MainWindow:
 
         # --- Start Workflow ---
         self.is_running = True # Set running flag
-        self.add_message("User", user_prompt) # Add user prompt to conversation display
-        if self.prompt_entry: self.prompt_entry.delete(0, END) # Clear prompt entry
+        if user_prompt:
+            self.add_message("User", user_prompt) # Add user prompt to conversation display
+            if self.prompt_entry: self.prompt_entry.delete(0, END) # Clear prompt entry
+        else:
+            self.add_message("System", "Continuing previous workflow...")
+ 
         self._set_ui_running_state(True) # Disable UI controls
-
+ 
         thread_target = None # Function to run in the background thread
         thread_args: Tuple = () # Arguments for the thread target
-
-        # Determine if this is the initial run (needs project init) or a subsequent prompt
-        run_as_initial = self.needs_initialization # Check the flag set during init/re-init
-
-        if run_as_initial and self.project_root:
-            logger.info(f"Starting initial workflow run. Prompt: '{user_prompt[:100]}...'")
+ 
+        # --- DEFINITIVE FIX: Restructure logic to prioritize the 'continue' state ---
+        if is_continue_button_press:
+            # If the UI is in a "Continue" state, ALWAYS choose the continue path.
+            logger.info("Continuing previously stopped workflow based on button text.")
+            thread_target = self._run_new_feature_thread
+            thread_args = ("",) # Pass an empty prompt to signal continuation
+        elif self.is_new_project.get() and self.project_root:
+            # If not continuing, check if the "New Project" checkbox is ticked.
+            # This is the most reliable way to know if we should run the initial setup workflow.
+            logger.info(f"Starting initial workflow run for new project. Prompt: '{user_prompt[:100]}...'")
             thread_target = self._run_initial_workflow_thread
-            is_new = self.is_new_project.get()
-            thread_args = (user_prompt, selected_framework, is_new)
-            self.needs_initialization = False # Reset flag after starting initial run
+            thread_args = (user_prompt, selected_framework, True) # Pass True for is_new_project
+            # After starting the initial run, this is no longer a "new" project for subsequent prompts.
+            self.is_new_project.set(False)
         else:
-            logger.info(f"Handling subsequent prompt as new feature request: '{user_prompt[:100]}...'")
+            # If not continuing and not a new project, it must be a subsequent new feature request.
+            logger.info(f"Handling subsequent prompt as new feature request: '{user_prompt[:100]}...'") # type: ignore
             thread_target = self._run_new_feature_thread
             thread_args = (user_prompt,)
+        # --- END FIX ---
 
         # Start the background thread
         if thread_target:
@@ -1104,6 +1958,8 @@ class MainWindow:
             thread.start()
         else:
             # Should not happen if logic above is correct
+            self.needs_initialization = False # Reset flag after starting initial run
+            self.is_continuing_run = False # Reset continue flag
             logger.error("Could not determine workflow thread target.")
             self.update_progress_safe({"error": "Internal error: Could not determine workflow action."})
             self._finalize_run_ui(False) # Unlock UI on error
@@ -1116,8 +1972,8 @@ class MainWindow:
         """
         """Helper method to enable/disable UI elements based on workflow running state."""
         new_state = DISABLED if running else NORMAL
-        readonly_state = DISABLED if running else "readonly" # For Comboboxes
-        cursor = "watch" if running else "" # Change cursor to indicate busy state
+        readonly_state = "disabled" if running else "readonly" # For Comboboxes
+        cursor = "" # Change cursor to indicate busy state
 
         try:
             # --- Animation Control ---
@@ -1126,23 +1982,29 @@ class MainWindow:
             else:
                 self._stop_animation() # Stop animation
 
-            # --- MODIFIED LOGIC ---
-            # Only enable the send button and prompt if the full initialization is complete.
-            # Otherwise, keep them disabled.
-            if not running and self.core_components_initialized:
-                if self.send_button and self.send_button.winfo_exists(): # type: ignore
-                    self.send_button.configure(state=NORMAL)
-                if self.prompt_entry and self.prompt_entry.winfo_exists(): # type: ignore
-                    self.prompt_entry.configure(state=NORMAL)
-            else:
-                if self.send_button and self.send_button.winfo_exists(): # type: ignore
-                    self.send_button.configure(state=DISABLED)
-                if self.prompt_entry and self.prompt_entry.winfo_exists(): # type: ignore
+            # --- MODIFIED: Dynamic Send/Stop/Continue Button ---
+            if self.send_button and self.send_button.winfo_exists():
+                if running:
+                    self.send_button.configure(text="⏹️ Stop", state=NORMAL, fg_color="#E81123", hover_color="#C2101F")
+                elif self.is_continuing_run:
+                    # --- DEFINITIVE FIX: Prioritize the 'Continue' state ---
+                    self.send_button.configure(text="▶️ Continue", state=NORMAL, fg_color="#F7630C", hover_color="#D9530A")
+                elif self.core_components_initialized:
+                    self.send_button.configure(text="▶️ Start", state=NORMAL, fg_color="#0078D4", hover_color="#0098FF")
+                else:
+                    self.send_button.configure(text="▶️ Start", state=DISABLED)
+
+            # Prompt entry should be disabled if running or if we are in a 'continue' state
+            if self.prompt_entry and self.prompt_entry.winfo_exists():
+                if running or self.is_continuing_run:
                     self.prompt_entry.configure(state=DISABLED)
+                # --- FIX: Explicitly enable the prompt if not running and not in continue mode ---
+                elif not self.is_continuing_run:
+                    self.prompt_entry.configure(state=NORMAL)
 
             # Enable/disable framework selection (allow changing only when not running)
             fw_state = readonly_state if self.available_frameworks and not running else "disabled"
-            if self.framework_dropdown and self.framework_dropdown.winfo_exists():
+            if self.framework_dropdown and self.framework_dropdown.winfo_exists() and not self.is_continuing_run:
                 self.framework_dropdown.configure(state=fw_state)
 
             # Enable/disable New Project checkbox and help icon
@@ -1156,12 +2018,13 @@ class MainWindow:
                 self.provider_dropdown.configure(state=readonly_state)
             if self.model_dropdown and self.model_dropdown.winfo_exists(): self.model_dropdown.configure(state=readonly_state)
             if self.tars_temp_scale and self.tars_temp_scale.winfo_exists(): self.tars_temp_scale.configure(state=new_state)
+            if self.change_api_key_button and self.change_api_key_button.winfo_exists(): self.change_api_key_button.configure(state=new_state)
             if self.case_temp_scale and self.case_temp_scale.winfo_exists(): self.case_temp_scale.configure(state=new_state)
             if self.select_project_button and self.select_project_button.winfo_exists(): self.select_project_button.configure(state=new_state)
 
             # Set cursor for the main window
             if self.master.winfo_exists():
-                self.master.configure(cursor=cursor)
+                self.master.config(cursor=self.default_cursor_spec)
 
         except tk.TclError as e:
             # Catch potential errors if widgets are destroyed unexpectedly
@@ -1199,153 +2062,167 @@ class MainWindow:
         self._animation_step = (self._animation_step + 1) % len(frames)
         self.animation_job = self.master.after(100, self._animate)
 
+    def _start_timer(self):
+        """Starts the elapsed time counter in the status bar."""
+        if self.timer_job:
+            self.master.after_cancel(self.timer_job)
+        self.start_time = time.monotonic()
+        self._update_timer()
+
+    def _stop_timer(self):
+        """Stops the elapsed time counter."""
+        if self.timer_job:
+            self.master.after_cancel(self.timer_job)
+            self.timer_job = None
+
+    def _update_timer(self):
+        """Updates the elapsed time label every second."""
+        if self.is_running and self.start_time and self.time_label:
+            elapsed = time.monotonic() - self.start_time
+            self.time_label.configure(text=f"⏱️ {int(elapsed // 60):02d}:{int(elapsed % 60):02d}")
+            self.timer_job = self.master.after(1000, self._update_timer)
+
     def _run_initial_workflow_thread(self, initial_prompt: str, framework: str, is_new_project: bool):
         """
-        The target function for the background thread when the user starts the
-        very first workflow for a project. It runs the full `initialize_project`
-        and `run_feature_cycle` methods of the `WorkflowManager`.
-        """
-        """
         Target function for the background thread to run the initial project setup
-        and the first feature cycle.
+        and the first adaptive workflow.
         """
         success = False
         run_completed = False
         try:
             if self.workflow_manager_instance and self.project_root:
-                logger.info("Background thread: Starting project initialization...")
-                # Run the initialization part of the workflow
-                # Ensure initialize_project is awaited if it's async
+                logger.info("Background thread: Starting project initialization and adaptive workflow...")
+
+                # The new initialize_project now handles the entire initial workflow run.
                 asyncio.run(self.workflow_manager_instance.initialize_project(
                     project_root=self.project_root,
                     framework=framework,
                     initial_prompt=initial_prompt,
                     is_new_project=is_new_project
                 ))
-                logger.info("Background thread: Project initialization complete. Starting feature cycle...")
-                # Run the feature development cycle
-                # Ensure run_feature_cycle is awaited if it's async
-                asyncio.run(self.workflow_manager_instance.run_feature_cycle())
-                run_completed = True # Mark as completed if no exceptions occurred
-                logger.info("Background thread: Initial workflow run finished.")
 
-                # Check final state for errors
-                if self.workflow_manager_instance.project_state:
-                    # Use attribute access for Pydantic models
-                    if any(f.status == "failed" for f in self.workflow_manager_instance.project_state.features):
-                        success = False
-                        logger.warning("Initial workflow finished, but at least one feature failed.")
-                    else:
-                        success = True # No exceptions and no failed features
-                else:
-                    success = False # Should not happen if init succeeded
-                    logger.error("Initial workflow finished, but project state is missing.")
+                run_completed = True # Mark as completed if no exceptions occurred
+                logger.info("Background thread: Initial workflow run finished successfully.")
+
+                # A simple success check for the adaptive workflow.
+                # The workflow itself reports detailed progress and errors to the UI.
+                success = True 
             else:
                 logger.error("WorkflowManager instance or project root not available for initial run.")
-                # Send error back to UI thread (note: the extra ')' was a typo, removed)
-                self.update_progress_safe({"error": "WorkflowManager not initialized or no project selected."})
+                self.update_progress_safe({"issue": "WorkflowManager not initialized or no project selected."})
         except InterruptedError as e:
-            # User cancelled via a dialog (e.g., API key prompt, confirmation)
             logger.warning(f"Initial workflow cancelled by user: {e}")
-            self.update_progress_safe({"error": f"Operation cancelled by user: {e}"})
+            self.update_progress_safe({"system_message": "⏸️ You asked me to pause—waiting for your next action.\nPlease click 'Continue' if you’d like to resume!"})
+            success = False
         except (RateLimitError, AuthenticationError) as api_err:
-            # Catch specific API errors from the workflow
             logger.error(f"API Error during initial workflow: {api_err}")
-            self.update_progress_safe({"error": f"API Error: {api_err}"})
-            success = False # Mark as failed due to API error
+            self.update_progress_safe({"issue": f"API Communication Issue: {api_err}"})
+            success = False
         except Exception as e:
-            # Catch any other exceptions during the workflow
             logger.exception("An error occurred during the initial WorkflowManager run.")
-            self.update_progress_safe({"error": f"Workflow failed: {e}"})
-            success = False # Mark as failed
+            self.update_progress_safe({"issue": f"Workflow encountered an issue: {e}"})
+            success = False
         finally:
-            # Ensure UI is updated and unlocked, regardless of success/failure
-            # Put a message on the queue for the UI thread to finalize
             logger.debug("Background thread: Putting finalize message on UI queue.")
-            self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"finalize": True, "success": success and run_completed}))
-
+            # Pass a 'stopped' flag if the exception was an interruption
+            was_stopped = isinstance(sys.exc_info()[1], InterruptedError)
+            self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"finalize": True, "success": success and run_completed, "stopped": was_stopped}))
 
     def _run_new_feature_thread(self, prompt: str):
         """
-        The target function for the background thread when the user submits a new
-        prompt after the initial setup is complete. It runs the `handle_new_prompt` method.
-        """
-        """
-        Target function for the background thread to handle a subsequent prompt,
-        identifying new features and running the development cycle for them.
+        Target function for the background thread to handle a subsequent prompt
+        by running the adaptive workflow.
         """
         success = False
         run_completed = False
-        try:
+        try: # --- FIX: Simplified logic to always use handle_new_prompt ---
             if self.workflow_manager_instance:
-                logger.info("Background thread: Starting new feature request processing...")
-                # Handle the new prompt (identifies features, runs cycle)
-                # Ensure handle_new_prompt is awaited if it's async
+                logger.info(f"Background thread: Calling handle_new_prompt with: '{prompt[:50]}...'")
+                # handle_new_prompt is smart enough to know whether to start a new feature
+                # (if prompt is not empty) or continue an existing one (if prompt is empty).
                 asyncio.run(self.workflow_manager_instance.handle_new_prompt(prompt))
-                run_completed = True
-                logger.info("Background thread: New feature workflow run finished.")
 
-                # Check final state for errors
-                if self.workflow_manager_instance.project_state:
-                    # Check if any features *overall* are marked as failed using attribute access
-                    if any(f.status == "failed" for f in self.workflow_manager_instance.project_state.features):
-                        success = False
-                        logger.warning("New feature workflow finished, but at least one feature has failed.")
-                    else:
-                        success = True # No exceptions and no failed features
-                else:
-                    success = False
-                    logger.error("New feature workflow finished, but project state is missing.")
-            else:
-                logger.error("WorkflowManager instance not available for new feature run.")
-                self.update_progress_safe(({"error": "WorkflowManager not initialized."}))
+                run_completed = True
+                logger.info("Background thread: New adaptive workflow run finished.")
+
+                # Simple success check, as the workflow itself reports errors to UI.
+                success = True
+            else: # --- END FIX ---
+                logger.error("WorkflowManager instance or project root not available for new feature run.")
+                self.update_progress_safe({"issue": "WorkflowManager not initialized or project not selected."})
 
         except InterruptedError as e:
             logger.warning(f"New feature workflow cancelled by user: {e}")
-            self.update_progress_safe({"error": f"Operation cancelled by user: {e}"})
+            self.update_progress_safe({"system_message": "⏸️ You asked me to pause—waiting for your next action.\nPlease click 'Continue' if you’d like to resume!"})
+            success = False
         except (RateLimitError, AuthenticationError) as api_err:
-            # Catch specific API errors from the workflow
             logger.error(f"API Error during new feature workflow: {api_err}")
-            self.update_progress_safe({"error": f"API Error: {api_err}"})
-            success = False # Mark as failed due to API error
+            self.update_progress_safe({"issue": f"API Communication Issue: {api_err}"})
+            success = False
         except Exception as e:
             logger.exception("An error occurred during the new feature WorkflowManager run.")
-            self.update_progress_safe({"error": f"Workflow failed: {e}"})
-            success = False # Mark as failed
+            self.update_progress_safe({"issue": f"Workflow encountered an issue: {e}"})
+            success = False
         finally:
             logger.debug("Background thread: Putting finalize message on UI queue.")
-            self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"finalize": True, "success": success and run_completed}))
+            # Pass a 'stopped' flag if the exception was an interruption
+            was_stopped = isinstance(sys.exc_info()[1], InterruptedError)
+            self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"finalize": True, "success": success and run_completed, "stopped": was_stopped}))
 
-    def _finalize_run_ui(self, success: bool):
+    def _update_continue_state(self):
+        """Checks the project state and updates the UI's continue flag and status messages."""
+        # --- DEFINITIVE FIX: Query the WorkflowManager directly for the authoritative state ---
+        if not self.workflow_manager_instance:
+            self.is_continuing_run = False
+            return
+
+        continuable_feature = self.workflow_manager_instance.can_continue()
+
+        if continuable_feature:
+            self.is_continuing_run = True
+            logger.info(f"Project has an in-progress feature ('{continuable_feature.name}'). Setting UI to continue.")
+            self.status_var.set(f"Project loaded. Ready to continue feature: '{continuable_feature.name}'.")
+        else:
+            self.is_continuing_run = False
+            # No need to log here, as this is the default state.
+        # --- END FIX ---
+    def _finalize_run_ui(self, success: bool, stopped: bool = False):
         """
         Updates all UI elements after a background workflow run completes,
         either successfully or with an error. This is always called on the main UI thread.
         """
-        """
-        Updates UI elements after a background workflow run completes.
-        This method is called by the UI thread via the queue message.
-        """
-        logger.debug(f"Finalizing run UI. Success: {success}")
+        logger.debug(f"Finalizing run UI. Success: {success}, Stopped: {stopped}")
         self.is_running = False # Reset running flag
+
+        self._update_continue_state()
+
         self._set_ui_running_state(False) # Re-enable UI controls
 
         # Update status bar message based on success/failure
         project_name = Path(self.project_root).name if self.project_root else "No Project"
         framework_name = self.framework_var.get() # type: ignore
+
+        # --- FIX: Handle the 'stopped' state explicitly ---
+        if stopped:
+            # The 'continue' message is already set by _update_continue_state, which is what we want.
+            final_status = self.status_var.get()
+            logger.info(f"Workflow stopped by user. UI updated. Status: {final_status}")
+            self.status_var.set(final_status)
+            return # Exit early to avoid overwriting the status
+
         if success:
             final_status = f"Project: {project_name} | Framework: {framework_name} | Workflow finished successfully."
-            # The progress bar is now part of the task card, so we don't set it here.
-            # We can just ensure the final status is correct.
-        else:
-            # Check if status already contains an error/cancelled message
+        elif self.is_continuing_run:
+            # If we can continue, the status is already set by _update_continue_state
+            final_status = self.status_var.get()
+        else: # Not success and not continuable
             current_status = self.status_var.get()
-            if "Error:" not in current_status and "Cancelled" not in current_status and "Failed" not in current_status:
-                final_status = f"Project: {project_name} | Framework: {framework_name} | Workflow finished with errors."
+            if "Issue:" not in current_status and "Cancelled" not in current_status:
+                final_status = f"Project: {project_name} | Framework: {framework_name} | Workflow completed with issues."
             else:
-                final_status = current_status # Keep the specific error message
-            # Don't reset progress bar on failure, keep its last value
+                final_status = current_status
         self.status_var.set(final_status)
-        logger.info(f"Workflow finished. UI updated. Final Status: {final_status}")
+        logger.info(f"Workflow finalized. UI updated. Final Status: {final_status}")
 
     def add_message(self, sender: str, message: str):
         """
@@ -1358,20 +2235,147 @@ class MainWindow:
         This is the public method to be called from anywhere (including background threads).
 
         Args:
-            sender: The source of the message (e.g., "System", "User", "Tars", "Case", "CMD").
+            sender: The source of the message (e.g., "System", "User", "TARS", "CASE", "CMD").
             message: The message content string.
         """
         message_str = str(message) if message is not None else "" # Ensure message is a string
         # Determine the appropriate update type based on the sender
-        if sender.lower() in ["tars", "case"]:
-            # Agent messages go to conversation display primarily
-            self.update_progress_safe({'agent_name': sender, 'agent_message': message_str})
+        if sender.lower() in ("tars", "case"):
+            # ✅ NEW: Agent thoughts go to Updates/Logs, code goes to Code Output
+            self.add_agent_thought_to_logs(sender, message_str)
         elif sender.upper() == "CMD":
-            # Command output goes to updates display
-            self.update_progress_safe({'command_output': message_str})
+            # Commands go to Updates/Logs
+            self.add_log_message("INFO", "CMD", message_str)
         else:
-            # System, User, or other messages go to both (or primarily updates)
-            self.update_progress_safe({'system_message': f"{sender}: {message_str}"})
+            # System messages go to Updates/Logs
+            self.add_log_message("INFO", sender, message_str)
+
+    def format_action_card(self, action: str, parameters: Dict[str, Any]) -> str:
+        """
+        Formats an agent's action and parameters into a compact, readable card.
+        
+        Example output:
+            ⚡ Running: python manage.py startapp calculator
+            📄 Reading calculator/admin.py
+            ✏️ Updating 🐍 calculator/models.py 
+        """
+        icon = ACTION_ICONS.get(action, "⚙️")
+        readable_action = action.replace("_", " ").title()
+        
+        # Handle different parameter types
+        if "file_path" in parameters:
+            path = parameters["file_path"]
+            ext = path.split(".")[-1] if "." in path else ""
+            file_icon = self.FILE_ICONS.get(ext.lower(), "📄")
+            return f"{icon} {readable_action} {file_icon} {path}"
+        elif "command" in parameters:
+            cmd = parameters["command"]
+            return f"🛡️ Running (Sandbox): {cmd}"
+        elif "prompt" in parameters:
+            prompt = parameters["prompt"]
+            return f"{icon} {readable_action}: {prompt[:60]}..."
+        elif "reason" in parameters:
+            return f"{icon} {readable_action}: {parameters['reason'][:50]}..."
+        else:
+            return f"{icon} {readable_action}"
+
+
+    def add_agent_thought_to_logs(self, agent_name: str, message: str):
+        '''Parse agent message: thoughts to Updates/Logs, code to Code Output'''
+        # Parse for Thought + Action from the agent's plaintext message
+        thought_match = re.search(r'Thought:\s*(.*?)(?=\nAction:|$)', message, re.DOTALL)
+        action_match = re.search(r'Action:\s*(\w+)', message)
+        params_match = re.search(r'Parameters:\s*(\{.*?\})', message, re.DOTALL)
+
+        # Display Thought (if exists)
+        if thought_match:
+            # ✅ FIX #1: Clean up the thought text before displaying
+            thought = thought_match.group(1).strip()
+            thought = thought.replace("Thought:", "").strip()
+            thought = re.sub(r'^[🤔💭🧠🔧✅]\s*', '', thought)
+            formatted_thought = f"💭 {thought}"
+            self.add_log_message("INFO", agent_name, formatted_thought)
+
+        # Display Action (if exists)
+        if action_match and params_match:
+            action = action_match.group(1)
+            try: # ✅ FIX #2: Only display the formatted action, not the raw text
+                parameters = ast.literal_eval(params_match.group(1)) # type: ignore
+                formatted_action = self.format_action_card(action, parameters)
+                self.add_log_message("INFO", agent_name, formatted_action)
+                return  # Exit here to prevent logging the raw message
+            except Exception as e:
+                logger.warning(f"Failed to parse action parameters: {e}")
+                self.add_log_message("INFO", agent_name, f"⚙️ {action.replace('_', ' ').title()}")
+                return  # Exit here as well
+        elif not thought_match:
+            # No thought or action, display as-is
+            self.add_log_message("INFO", agent_name, message)
+
+    def add_log_message(self, level: str, source: str, message: str, details: Optional[Dict] = None):
+        """
+        Adds a structured and colored log message to the 'Updates / Logs' display.
+        This method is designed to be called from the main UI thread.
+        """
+        if not self.updates_display or not self.updates_display.winfo_exists(): # type: ignore
+            return
+        
+        log_entry_frame = ctk.CTkFrame(self.updates_display, fg_color="transparent")
+        
+        # --- REFACTORED: Create a single, formatted log line ---
+        timestamp = f"[{datetime.now().strftime('%H:%M:%S')}]"
+        
+        # Main log line
+        main_line_frame = ctk.CTkFrame(log_entry_frame, fg_color="transparent")
+        main_line_frame.pack(fill=X)
+
+        # --- FIX: Determine the correct source *before* selecting the icon ---
+        # Auto-detect if this is a sandbox message based on keywords.
+        sandbox_keywords = ["virtual environment", "installing requirements", "running command", "executing", "sandbox"]
+        if any(keyword in message.lower() for keyword in sandbox_keywords):
+            source = "Sandbox"
+
+        # Use a single label for the main log message for better alignment and wrapping
+        full_message = f"{timestamp} " # type: ignore
+        if source:
+            # Now that the source is corrected, select the appropriate icon.
+            if source == "Sandbox":
+                icon = "🛡️"
+            else:
+                icon = "⚙️" if source == "System" else ("🤖" if source in ("TARS", "CASE") else "👤")
+            full_message += f"{icon} {source} · "
+        # --- END FIX ---
+
+        full_message += message.strip() # type: ignore
+
+        message_label = ctk.CTkLabel(main_line_frame, text=full_message, text_color="#DCE4EE", font=("Segoe UI", 12), wraplength=self.updates_display.winfo_width() - 50, justify=LEFT, anchor="w")
+        message_label.pack(fill=X, expand=True)
+
+        # --- NEW: Collapsible Action Details ---
+        if details:
+            details_frame = ctk.CTkFrame(log_entry_frame, fg_color="#1E1E2E", corner_radius=4)
+            # Initially hidden
+
+            def toggle_details():
+                if details_frame.winfo_viewable():
+                    details_frame.pack_forget()
+                    toggle_button.configure(text="▶ Show details")
+                else:
+                    details_frame.pack(fill=X, padx=(20, 0), pady=5, ipady=5)
+                    toggle_button.configure(text="▼ Hide details")
+
+            toggle_button = ctk.CTkButton(main_line_frame, text="▶ Show details", command=toggle_details, fg_color="transparent", text_color="#808080", hover=False, width=20, font=("Segoe UI", 10))
+            toggle_button.pack(side=LEFT, padx=(20, 0))
+
+            # Populate the details frame
+            for key, value in details.items():
+                detail_line = ctk.CTkLabel(details_frame, text=f"│ {key.title():<10}: {value}", font=("Consolas", 11), anchor="w")
+                detail_line.pack(fill=X, padx=10)
+
+        log_entry_frame.pack(fill=X, padx=10, pady=(2, 2))
+        
+        # Scroll to the bottom to show the latest message
+        self._scroll_updates_to_bottom()
 
     def _add_message_to_widget(self, widget: Optional[ctk.CTkTextbox], sender: str, message: str, tag: Optional[str] = None):
         """
@@ -1439,6 +2443,221 @@ class MainWindow:
         except Exception as e:
             logger.exception(f"Error adding message to widget {widget}: {e}")
 
+    # --- NEW: Syntax Highlighting Parser ---
+    class PygmentsHTMLParser(HTMLParser):
+        """Parses Pygments-generated HTML and applies styles to a CTkTextbox."""
+        def __init__(self, text_widget: ctk.CTkTextbox, style_name: str = 'monokai'):
+            super().__init__()
+            self.widget = text_widget
+            self.tags = []
+            self.style_name = style_name
+            # Pre-define some basic styles to avoid creating them repeatedly
+            try:
+                self.widget.tag_config("code_block_base", background="#1E1E2E")
+            except Exception:
+                pass # Ignore if it fails, font is the main issue
+
+        def handle_starttag(self, tag, attrs):
+            if tag == 'span':
+                style_dict = {}
+                for attr, value in attrs:
+                    if attr == 'style':
+                        # Simple style parser for "key: value; key2: value2"
+                        style_rules = value.split(';')
+                        for rule in style_rules:
+                            if ':' in rule:
+                                key, val = rule.split(':', 1)
+                                style_dict[key.strip()] = val.strip()
+                
+                if style_dict:
+                    # Create a unique tag name based on the style
+                    tag_name = f"style_{hash(value)}"
+                    
+                    # Configure the tag in the widget if it doesn't exist
+                    if tag_name not in self.widget.tag_names():
+                        font_weight = "bold" if style_dict.get('font-weight') == 'bold' else "normal"
+                        font_slant = "italic" if style_dict.get('font-style') == 'italic' else "roman"
+
+                        self.widget.tag_config(
+                            tag_name,
+                            foreground=style_dict.get('color'),
+                            # font=font # This is forbidden
+                            # We can add underline or other supported styles here if needed
+                        )
+                    self.tags.append(tag_name)
+
+        def handle_endtag(self, tag):
+            if tag == 'span' and self.tags:
+                self.tags.pop()
+
+        def handle_data(self, data):
+            # Apply the current stack of tags plus the base style
+            current_tags = tuple(self.tags + ["code_block_base"])
+            self.widget.insert("end", data, current_tags)
+
+    def _display_highlighted_code(self, widget: ctk.CTkTextbox, code: str, language: str):
+        """Renders syntax-highlighted code into a CTkTextbox."""
+        try:
+            lexer = get_lexer_by_name(language, stripall=True)
+        except Exception:
+            try:
+                lexer = guess_lexer(code)
+            except Exception:
+                # Fallback to plain text if lexer guessing fails
+                widget.insert("end", code, "code_block_base")
+                return
+
+        # Use a dark theme that fits the UI
+        formatter = HtmlFormatter(style='monokai', noclasses=True, nobackground=True)
+        highlighted_html = highlight(code, lexer, formatter)
+
+        # Use the custom parser to render the HTML into the widget
+        parser = self.PygmentsHTMLParser(widget)
+        parser.feed(highlighted_html)
+
+    def copy_with_animation(self, text: str, button: ctk.CTkButton): # type: ignore
+        """Copy with smooth animation feedback"""
+        try:
+            self.master.clipboard_clear()
+            self.master.clipboard_append(text)
+            
+            # Animate button
+            original_text = button.cget("text")
+            original_color = button.cget("fg_color")
+            button.configure(text="✓ Copied!", fg_color="#10B981", state="disabled")
+            
+            def reset():
+                if button.winfo_exists():
+                    button.configure(text=original_text, fg_color=original_color, state="normal")
+            
+            self.master.after(2000, reset)
+        except Exception as e:
+            logger.error(f"Failed to copy to clipboard: {e}")
+            button.configure(text="✗ Failed", fg_color="#EF4444")
+            self.master.after(2000, lambda: button.configure(text="📋 Copy"))
+
+    def toggle_code_visibility(self, code_frame: ctk.CTkFrame, button: ctk.CTkButton):
+        """Toggles the visibility of the code block."""
+        if code_frame.winfo_viewable():
+            code_frame.pack_forget()
+            button.configure(text="▶ Expand")
+        else:
+            code_frame.pack(fill="both", expand=True, padx=1, pady=(0, 1))
+            button.configure(text="▼ Collapse")
+
+    def _create_modern_code_block(self, parent: Union[ctk.CTkTextbox, ctk.CTkScrollableFrame], code: str, language: str = "python", agent_name: Optional[str] = None, file_path: Optional[str] = None):
+        """Create a modern, collapsible code block with copy button and syntax highlighting."""
+        
+        # Container with modern styling
+        code_container = ctk.CTkFrame(
+            parent,
+            fg_color="#000000",  # Black background
+            border_width=1,
+            border_color="#313244",
+            corner_radius=8
+        )
+        # --- BUG FIX: Pack the container into the parent scrollable frame ---
+        # This is the correct way to add a widget to a CTkScrollableFrame.
+        code_container.pack(fill="x", padx=10, pady=5, expand=True)
+
+        # Header with language badge and copy button
+        header = ctk.CTkFrame(code_container, fg_color="#181825", corner_radius=0)
+        header.pack(fill="x", padx=0, pady=0)
+        
+        # --- NEW: Display Agent Name or File Path ---
+        header_text = ""
+        if agent_name:
+            header_text = f"⚙️ {agent_name.upper()}"
+        elif file_path:
+            header_text = f"📄 {file_path}"
+        
+        header_label = ctk.CTkLabel(header, text=header_text, font=("Segoe UI", 11, "bold"), text_color="#CDD6F4", anchor="w")
+        header_label.pack(side="left", padx=10, pady=5)
+
+        lang_badge = ctk.CTkLabel(
+            header,
+            text=f"  {language}  ",
+            fg_color="#6366F1",
+            text_color="#FFFFFF",
+            corner_radius=4,
+            font=("Consolas", 10, "bold")
+        )
+        lang_badge.pack(side="left", padx=0, pady=5)
+        
+        # Line count info
+        line_count = len(code.split('\n'))
+        info_label = ctk.CTkLabel(
+            header,
+            text=f"{line_count} lines",
+            text_color="#7F849C",
+            font=("Segoe UI", 9)
+        )
+        info_label.pack(side="left", padx=5)
+        
+        # Copy button (modern style)
+        copy_btn = ctk.CTkButton(
+            header,
+            text="📋 Copy",
+            width=80,
+            height=24,
+            fg_color="transparent",
+            hover_color="#313244",
+            border_width=1,
+            border_color="#45475A",
+                font=("Segoe UI", 12),
+            command=lambda: self.copy_with_animation(code, copy_btn)
+        )
+        copy_btn.pack(side="right", padx=10, pady=5)
+        
+        # Show Full Code button
+        show_full_btn = ctk.CTkButton(
+            header, 
+            text="Show Full Code", 
+            width=120, 
+            height=24, 
+            fg_color="transparent", 
+            hover_color="#313244",
+            border_width=1,
+            border_color="#45475A",
+            command=lambda: self.toggle_full_code_view(code_textbox, show_full_btn, line_count)
+        )
+        show_full_btn.pack(side="right", padx=5)
+        # Code textbox frame
+        code_frame = ctk.CTkFrame(code_container, fg_color="#1E1E2E", corner_radius=0)
+        
+        # Expand/Collapse button for long code
+        # Always add the collapse button for consistency
+        collapse_btn = ctk.CTkButton(
+            header,
+            text="▼ Collapse",
+            width=90,
+            height=24,
+            fg_color="transparent",
+            hover_color="#313244",
+            command=lambda: self.toggle_code_visibility(code_frame, collapse_btn)
+        )
+        collapse_btn.pack(side="right", padx=5)
+
+        # Code content textbox
+        code_textbox = ctk.CTkTextbox(
+            code_frame,
+            fg_color="#1E1E2E",
+            text_color="#CDD6F4",
+            font=("Consolas", 11),
+            wrap="none",
+            activate_scrollbars=True,
+            height=300  # Initial limited height
+        )        
+        # Insert highlighted code
+        self._display_highlighted_code(code_textbox, code, language)
+        
+        # Pack the frame containing the textbox
+        code_frame.pack(fill="x", padx=1, pady=(0, 1))
+        code_textbox.pack(fill="both", expand=True)
+        code_textbox.configure(state="disabled")
+
+        return code_container
+
     def update_progress_safe(self, progress_data: Dict[str, Any]):
         """
         Thread-safe method to send progress updates to the UI thread via the queue.
@@ -1453,18 +2672,118 @@ class MainWindow:
         """
         self.ui_queue.put((QUEUE_MSG_UPDATE_UI, progress_data))
 
-    def _update_ui_elements(self, progress_data: Dict[str, Any]):
+    def update_ui_elements(self, progress_data: Dict[str, Any]):
         """
         Updates UI elements based on data received from the queue.
-        This method MUST be called only from the UI thread.
+        This method MUST be called only from the UI thread. 
 
         Args:
             progress_data: The dictionary containing UI update information.
         """
         try:
-            if not self.master.winfo_exists(): return # Check if window still exists
+            if not self.master.winfo_exists():
+                return  # Check if window still exists
+            
+            # --- Update Progress Bar ---
+            if "increment" in progress_data and self.progress_bar and self.progress_bar.winfo_exists():
+                try: # type: ignore
+                    new_progress = min(max(0, float(progress_data["increment"])), 100)
+                    self.progress_var.set(new_progress) # type: ignore
+                except (ValueError, TypeError):
+                    pass
+
+            # --- Update Status Bar Message ---
+            if "message" in progress_data:
+                status_msg = str(progress_data["message"])
+                status_patterns = [
+                    "loading", "created", "setup", "virtual environment",
+                    "installing", "requirements", "django", "initializing",
+                    "analyzing", "identified", "ready", "starting", "processing",
+                    "planning", "implementing", "running", "agent", "project"
+                ]
+                
+                is_status = any(p in status_msg.lower() for p in status_patterns)
+                
+                if is_status:
+                    self.status_var.set(status_msg) # type: ignore                else:
+                    # Not a status update, log it instead
+                    self.add_log_message("INFO", "System", status_msg)
+            
+            # --- Display Agent Message (Handles thoughts + actions) ---
+            if "agent_name" in progress_data and "agent_message" in progress_data:
+                agent_name = str(progress_data.get("agent_name", "Agent")) # type: ignore
+                agent_message_str = str(progress_data.get("agent_message", "")) # type: ignore
+                
+                # Parse for Thought + Action
+                thought_match = re.search(r'Thought:\s*(.*?)(?=\nAction:|$)', agent_message_str, re.DOTALL)
+                action_match = re.search(r'Action:\s*(\w+)', agent_message_str)
+                params_match = re.search(r'Parameters:\s*(\{.*?\})', agent_message_str, re.DOTALL)
+                
+                # Display Thought
+                if thought_match:
+                    thought = thought_match.group(1).strip()
+                    # Remove emoji if already present
+                    thought = re.sub(r'^[🤔💭🧠]\s*', '', thought)
+                    self.add_log_message("INFO", agent_name, f"💭 {thought}")
+                
+                # Display Action
+                if action_match and params_match:
+                    action = action_match.group(1)
+                    try:
+                        parameters = ast.literal_eval(params_match.group(1)) # type: ignore
+                        formatted = self.format_action_card(action, parameters)
+                        self.add_log_message("INFO", agent_name, formatted)
+                    except:
+                        self.add_log_message("INFO", agent_name, f"⚙️ {action.replace('_', ' ').title()}")
+                elif not thought_match:
+                    # No thought or action, display as-is
+                    self.add_log_message("INFO", agent_name, agent_message_str)
+
+            # --- Display System Message in Logs Tab ---
+            if "system_message" in progress_data:
+                full_msg = str(progress_data["system_message"])
+                
+                # The add_log_message function now handles sender detection and icon selection internally.
+                self.add_log_message("INFO", "System", full_msg)
+                
+            # --- NEW: Handle displaying code diffs ---
+            if progress_data.get("display_code_diff"):
+                self.logger.info("Received request to display code diff.")
+                original = progress_data.get("original_content", "")
+                modified = progress_data.get("modified_content", "")
+                filepath = progress_data.get("filepath", "Unknown File")
+                
+                self._display_diff_with_highlighting(original, modified)
+                
+                # Switch to the diff tab to make it visible
+                if self.notebook:
+                    self.notebook.set("↔️ Code Diff")
+
+            # --- Display Error Message ---
+            if "issue" in progress_data:
+                issue_msg = str(progress_data["issue"]) # type: ignore
+                self.status_var.set(f"Notice: {issue_msg[:100]}...") # type: ignore
+                self.add_log_message("ERROR", "System", issue_msg)  # Keep ERROR level for logging clarity
+
+            # --- Display Action Details ---
+            if "action_details" in progress_data:
+                self.add_log_message("DEBUG", "System", str(progress_data["action_details"]))
 
             # --- Handle Internal UI Updates (e.g., button state changes) ---
+            if "internal_update" in progress_data and "widget_ref" in progress_data and "config" in progress_data:
+                widget = progress_data["widget_ref"] # type: ignore
+                config = progress_data["config"] # type: ignore
+                try:
+                    if widget and widget.winfo_exists():
+                        widget.configure(**config)
+                        logger.debug(f"Internal UI update applied to {widget}: {config}")
+                    else:
+                        logger.warning(f"Internal UI update skipped: Widget {widget} does not exist or reference lost.")
+                except Exception as e:
+                    logger.warning(f"Failed internal UI update for {widget}: {e}")
+                return  # Stop processing other keys for internal updates
+            
+            # Batch internal updates
             if "internal_updates" in progress_data:
                 updates = progress_data["internal_updates"]
                 if isinstance(updates, list):
@@ -1475,142 +2794,49 @@ class MainWindow:
                             try:
                                 if widget.winfo_exists():
                                     widget.configure(**config)
-                                    logger.debug(f"Batched UI update applied to widget {widget}: {config}")
-                            except Exception as e:
+                                    logger.debug(f"Batched UI update applied to {widget}: {config}") # type: ignore
+                            except Exception as e: # type: ignore
                                 logger.warning(f"Failed batched UI update for {widget}: {e}")
-                return # Stop processing other keys for internal updates
-
-            if progress_data.get("internal_update") and "widget_ref" in progress_data and "config" in progress_data:
-                widget = progress_data["widget_ref"]
-                config = progress_data["config"]
-                try:
-                    if widget and widget.winfo_exists(): # type: ignore
-                        widget.configure(**config)
-                        logger.debug(f"Internal UI update applied to widget {widget}: {config}")
-                    else:
-                        logger.warning(f"Internal UI update skipped: Widget {widget} does not exist or reference lost.")
-                except Exception as e:
-                    logger.warning(f"Failed internal UI update for {widget}: {e}")
-                return # Stop processing other keys for internal updates
-
-            # --- Update Progress Bar ---
-            if 'increment' in progress_data and self.progress_bar and self.progress_bar.winfo_exists():
-                try: # type: ignore
-                    new_progress_val = float(progress_data['increment'])
-                    new_progress = min(max(0, new_progress_val), 100) # Clamp between 0 and 100
-                    self.progress_var.set(new_progress)
-                except (ValueError, TypeError):
-                    logger.warning(f"Invalid 'increment' value received for progress bar: {progress_data['increment']}")
-
-            # --- Update Status Bar Message ---
-            if 'message' in progress_data:
-                status_msg = str(progress_data['message'])
-                # Update the status var, which will update any status labels that use it.
-                self.status_var.set(status_msg)
-
-            # --- Display Error Message ---
-            if 'error' in progress_data:
-                error_msg = str(progress_data['error'])
-                if self.status_label and self.status_label.winfo_exists():
-                    # Show truncated error in status bar
-                    self.status_var.set(f"Error: {error_msg[:100]}...")
-                # Add full error to both displays
-                self._add_log_message("System", f"Error: {error_msg}", tag="error")
-                self._add_message_to_widget(self.conversation_display, "System", f"Error: {error_msg}", tag="error")
-
-            # --- Display System Message ---
-            if 'system_message' in progress_data:
-                full_msg = str(progress_data['system_message'])
-
-                # The message might come in with a "Sender: " prefix.
-                # Let's get the core message for analysis.
-                if ':' in full_msg:
-                    try:
-                        sender, msg = full_msg.split(':', 1)
-                        msg = msg.strip()
-                    except ValueError:
-                        sender = "System"
-                        msg = full_msg
-                else:
-                    sender = "System"
-                    msg = full_msg.strip()
-
-                # Define patterns for messages that are status updates
-                status_patterns = [
-                    "loading project state", "created new project state", "setting up",
-                    "creating virtual environment", "waiting for user", "running setup",
-                    "virtual environment created", "installing requirements", "requirements installed",
-                    "running django-admin", "django project created", "initializing git",
-                    "initial framework setup complete", "analyzing request", "identified initial features",
-                    "initial project state ready", "starting feature development", "processing feature",
-                    "planning feature", "defining api contracts", "planning", "plan generated",
-                    "implementing feature", "implementing:", "task ", "generating code", "running test",
-                    "test step passed", "creating directory", "agent re-initialized", "project loaded",
-                    "ready for prompts", "using stored value"
-                ]
-                
-                is_status_update = any(p in msg.lower() for p in status_patterns) and sender.lower() != 'user'
-
-                if is_status_update:
-                    # If it's a status update, add it to the logs
-                    self._add_log_message(sender, msg)
-                    # And set the status bar text
-                    self.status_var.set(msg)
-                else:
-                    # If it's a conversational message (e.g. from User, or a summary from System)
-                    # add it ONLY to the conversation display.
-                    self._add_message_to_widget(self.conversation_display, sender, msg)
-
-            # --- Display Action Details ---
-            if 'action_details' in progress_data:
-                msg = str(progress_data['action_details'])
-                # Add action details to the logs display with 'action' tag
-                self._add_log_message("System", msg, tag="action")
-
-            # --- Display Agent Message ---
-            if 'agent_name' in progress_data and 'agent_message' in progress_data:
-                agent_name = str(progress_data['agent_name'])
-                agent_message = str(progress_data['agent_message'])
-                # Agent messages ONLY go to the conversation display
-                self._add_message_to_widget(self.conversation_display, agent_name, agent_message)
-
-            # --- Display Command Output ---
-            if 'command_output' in progress_data:
-                output = str(progress_data['command_output'])
-                # Command output goes to the updates/logs display
-                self._add_log_message("CMD", output, tag="command_output")
-
-        except tk.TclError as e:
+                return  # Stop processing other keys for internal updates
+            
+            # Scroll to bottom
+            self._scroll_updates_to_bottom() # type: ignore
+            
+        except tk.TclError as e: # type: ignore
             logger.warning(f"TclError updating UI elements: {e}")
         except Exception as e:
             logger.exception(f"Error updating UI elements: {e}")
 
-    def _add_log_message(self, sender: str, message: str, tag: Optional[str] = None):
+    def add_code_output(self, agent_name: str, thought: Optional[str] = None, action_type: Optional[str] = None, code_content: str = ""):
         """
-        Adds a formatted message to the 'Updates / Logs' tk.Text widget.
-        This method is specifically for the standard tk.Text widget.
+        Adds a formatted block of agent output (thought, code) to the main conversation display.
         This method MUST be called only from the UI thread.
-        """
-        # This method now adds a simple CTkLabel to the scrollable frame
-        scrollable_frame = self.updates_display
-        if not scrollable_frame or not scrollable_frame.winfo_exists():
+        """        
+        # If in file browser mode, don't add new generated code to the display.
+        if self.is_browsing_files:
+            logger.debug("In file browser mode, skipping display of newly generated code.")
             return
 
-        try:
-            message_tag = tag if tag and tag in self.text_tags else "default"
-            if tag is None:
-                msg_lower = message.lower()
-                if "error" in msg_lower or "failed" in msg_lower: message_tag = "error"
-                elif "warning" in msg_lower or "skipping" in msg_lower: message_tag = "warning"
-                elif "success" in msg_lower or "completed" in msg_lower: message_tag = "success"
+        if not self.conversation_display or not self.conversation_display.winfo_exists():
+            return
 
-            log_label = ctk.CTkLabel(scrollable_frame, text=f"[{sender.upper()}] {message}", wraplength=scrollable_frame.winfo_width() - 40, justify=LEFT, anchor="w", font=self.text_tags[message_tag]['font'], text_color=self.text_tags[message_tag].get('foreground', '#DCE4EE'))
-            log_label.pack(fill=X, padx=10, pady=2)
+        agent_emojis = { # type: ignore
+            "TARS": "🤖", "CASE": "⚙️", "SYSTEM": "💻", "USER": "👤", "CMD": "⚡"
+        }
+        agent_tag_map = {
+            "TARS": "agent_tars", "CASE": "agent_case", "SYSTEM": "agent_system", "USER": "agent_user", "CMD": "agent_system"
+        }
+        agent_emoji = agent_emojis.get(agent_name.upper(), "💡")
+        agent_tag = agent_tag_map.get(agent_name.upper(), "agent_system")
 
-        except tk.TclError as e:
-            logger.warning(f"TclError adding log message to widget {scrollable_frame}: {e}")
-        except Exception as e:
-            logger.exception(f"Error adding log message to widget {scrollable_frame}: {e}")
+        if code_content:
+            language = "python" # Default
+            if action_type:
+                try:
+                    language = get_lexer_by_name(action_type.lower()).name.lower()
+                except Exception:
+                    language = "text"
+            self._create_modern_code_block(self.conversation_display, code_content, language=language, agent_name=agent_name)
 
     def _process_ui_queue(self):
         """
@@ -1625,17 +2851,22 @@ class MainWindow:
         try:
             # Process all messages currently in the queue
             while not self.ui_queue.empty():
+                # --- FIX: Show the command card frame when a command is displayed ---
+                if self.command_card_frame and not self.command_card_frame.winfo_viewable():
+                    if any(msg[0] == QUEUE_MSG_DISPLAY_COMMAND for msg in list(self.ui_queue.queue)):
+                        self.command_card_frame.pack(side=BOTTOM, fill=X, expand=False, pady=(5,0), ipady=5)
+
                 message_type, data = self.ui_queue.get_nowait()
                 # logger.debug(f"Processing UI queue message: Type={message_type}, Data Keys: {list(data.keys()) if isinstance(data, dict) else 'N/A'}")
-                try:
+                try: # type: ignore
                     if message_type == QUEUE_MSG_UPDATE_UI:
                         # Check for the special 'finalize' key
                         if data.get("finalize"):
-                            logger.debug("Processing finalize UI message.")
-                            self._finalize_run_ui(data.get("success", False))
+                            logger.debug(f"Processing finalize UI message: {data}")
+                            self._finalize_run_ui(data.get("success", False), data.get("stopped", False))
                         else:
                             # Process standard UI updates
-                            self._update_ui_elements(data)
+                            self.update_ui_elements(data)
                     elif message_type == QUEUE_MSG_SHOW_DIALOG:
                         # Handle requests to show modal dialogs
                         self._handle_dialog_request(data)
@@ -1776,15 +3007,21 @@ class MainWindow:
         result: Tuple[Optional[str], bool] = (None, False)
 
         try:
+            is_rate_limit = "RateLimitError" in error_type
             title = f"API Key Issue: {agent_desc}"
-            message = (f"An API error occurred for {agent_desc}:\n{error_type}\n\n"
-                       f"Key name in use: {current_key_name}\n\n"
-                       f"Would you like to enter a new API key, retry with the current key, or cancel?")
-            # This could be a more sophisticated custom dialog. For now, using simpledialog and messagebox.
-            # 1. Ask if they want to update the key.
+            if is_rate_limit:
+                message = (f"The API rate limit was exceeded for {agent_desc}.\n\n"
+                           "This is usually temporary. You can retry with the current key, or provide a different key.\n\n"
+                           "Click 'Yes' to enter a new key.\nClick 'No' to retry with the current key.\nClick 'Cancel' to stop.")
+            else: # AuthenticationError
+                message = (f"An authentication error occurred for {agent_desc}.\n\n"
+                           f"The API key for '{current_key_name}' may be invalid or expired.\n\n"
+                           "Click 'Yes' to enter a new key.\nClick 'No' to retry with the current key.\nClick 'Cancel' to stop.")
+
+            # askyesnocancel returns True for Yes, False for No, None for Cancel
             update_key_choice = messagebox.askyesnocancel(
                 title,
-                message + "\n\nClick 'Yes' to enter a new key.\nClick 'No' to retry with the current key.\nClick 'Cancel' to stop this operation.",
+                message,
                 parent=self.master
             )
 
@@ -1954,6 +3191,89 @@ class MainWindow:
         # Use the generic dialog request method which is thread-safe
         return bool(await asyncio.to_thread(self._request_dialog_from_thread, "confirmation", title="Remediation Failed", prompt=prompt))
 
+    def _change_api_key_manual(self):
+        """
+        Handles the manual 'Change API Key' button click.
+        Prompts the user to select a provider and enter a new key, then re-initializes the agent.
+        """
+        if not self.config_manager or not self.agent_manager:
+            messagebox.showwarning("Not Ready", "Please select a project and initialize agents before changing keys.", parent=self.master)
+            # Since this is a simple warning, we won't add the icon logic here to keep it clean.
+            # The main issue is with the more complex dialogs that follow.
+            return
+
+        if self.is_running:
+            messagebox.showwarning("Busy", "Cannot change API key while a task is running.", parent=self.master)
+            return
+
+        # Create a temporary parent for the dialogs to set the icon
+        dialog_parent = tk.Toplevel(self.master)
+        dialog_parent.withdraw()
+
+        # Use the currently selected provider as the default
+        current_provider_display_name = self.provider_var.get()
+
+        # --- NEW: User-friendly check if "All" is selected ---
+        if current_provider_display_name == "All":
+            logger.info("User clicked 'Change API Key' with 'All' providers selected. Prompting for provider selection.")
+            messagebox.showinfo(
+                "Select a Provider",
+                "Please select a specific API provider from the dropdown menu first, then click 'Change API Key...' to update the key for that provider.",
+                parent=dialog_parent
+            )
+            return
+        # --- END NEW ---
+
+        # Find the provider ID and key name from the display name
+        provider_id_to_change = None
+        api_key_name_to_change = None
+        for pid, data in self.config_manager.providers_config.items():
+            if data.get("display_name") == current_provider_display_name:
+                provider_id_to_change = pid
+                api_key_name_to_change = data.get("api_key_name")
+                break
+
+        if not provider_id_to_change or not api_key_name_to_change:
+            # This case should now be rare, but kept as a safeguard.
+            logger.error(f"Could not find configuration for provider '{current_provider_display_name}' during manual key change.") # type: ignore
+            messagebox.showerror("Configuration Error", f"Could not find configuration for provider '{current_provider_display_name}'.", parent=dialog_parent)
+            return
+
+        # Set the icon on the temporary parent before showing the dialog
+        self._set_dialog_icon(dialog_parent)
+
+        # Prompt for the new key
+        new_key = simpledialog.askstring(
+            f"Update API Key for {current_provider_display_name}",
+            f"Enter new API key for {api_key_name_to_change}:",
+            show='*',
+            parent=dialog_parent # Use the temporary parent
+        )
+
+        if new_key and new_key.strip():
+            try:
+                dialog_parent.destroy() # Clean up the temporary window
+                # Store the new key
+                store_credential(api_key_name_to_change, new_key.strip())
+                self.add_message("System", f"API key for '{current_provider_display_name}' has been updated.")
+
+                # Trigger re-initialization
+                logger.info(f"Manual key change triggered re-initialization for provider '{provider_id_to_change}'.")
+                # We can simply call on_model_selected, as it contains all the necessary re-initialization logic.
+                self.on_model_selected()
+
+                messagebox.showinfo("Success", f"API key for {current_provider_display_name} updated successfully. Agents have been re-initialized.", parent=self.master) # type: ignore
+
+            except Exception as e:
+                logger.exception(f"Failed to store or re-initialize after manual key change for {current_provider_display_name}.")
+                messagebox.showerror("Error", f"Failed to update key or re-initialize agents: {e}", parent=self.master)
+        elif new_key is not None: # User clicked OK but entered an empty string
+            dialog_parent.destroy()
+            messagebox.showwarning("Input Required", "API key cannot be empty.", parent=self.master) # type: ignore
+        else: # User clicked Cancel
+            dialog_parent.destroy()
+            logger.info("Manual API key change was cancelled by the user.")
+
 
     # --- Command Execution Handling ---
 
@@ -1965,148 +3285,144 @@ class MainWindow:
         for the UI to display the command, then asynchronously waits for the UI thread to
         execute it and signal completion.
         """
-        """
-        Callback method for WorkflowManager to request command execution via the UI.
-        This method runs in the WorkflowManager's thread (likely an asyncio event loop).
-
-        It puts a request on the UI queue to display the command task, then waits
-        asynchronously for the UI thread to execute the command (or skip it) and
-        signal completion via an event.
-
-        Args:
-            task_id: A unique identifier for the command task.
-            command: The command string to be executed.
-            description: A user-friendly description of the command's purpose.
-
-        Returns:
-            A tuple (success: bool, output_or_error: str).
-        """
-        # Ensure this isn't called from the main UI thread
+        # This method is called from the backend thread.
+        # It needs to queue a request for the UI and then wait for the result.
         if threading.current_thread() is threading.main_thread():
             logger.error("Command execution requested directly from main thread - this is unsafe!")
             return False, "Internal error: Command execution requested synchronously from main thread."
 
-        event = threading.Event() # Event for synchronization
+        # Create an event that this backend thread will wait on.
+        # The UI thread will set this event when the command is done.
+        event = threading.Event()
         self.command_exec_events[task_id] = event
-        self.command_exec_results.pop(task_id, None) # Clear any previous result for this ID
 
-        # Data package for the UI queue message
-        request_data = {
+        # Queue the request for the UI thread to display the command widget.
+        self.ui_queue.put((QUEUE_MSG_DISPLAY_COMMAND, {
             "task_id": task_id,
             "command": command,
             "description": description
-        }
-        # Put the request on the queue for the UI thread to display the command task
-        self.ui_queue.put((QUEUE_MSG_DISPLAY_COMMAND, request_data))
-        logger.debug(f"Workflow thread waiting for UI command execution result for task {task_id}...")
+        }))
+
+        logger.debug(f"Backend thread for task {task_id} is now waiting for UI command execution...")
 
         # --- Asynchronous Wait ---
         # Since this method is called via `await` in WorkflowManager, we need to wait
         # without blocking the asyncio event loop. We run the blocking `event.wait()`
         # in a separate thread using asyncio's `to_thread`.
-        try:
-            await asyncio.to_thread(event.wait) # Wait for the UI thread to signal completion
-        except Exception as wait_e:
-            logger.exception(f"Error while waiting for command execution event for task {task_id}: {wait_e}")
-            # Clean up event if wait fails
-            self.command_exec_events.pop(task_id, None)
-            self.command_exec_results.pop(task_id, None)
-            return False, f"Error waiting for command result: {wait_e}"
+        await asyncio.to_thread(event.wait)
 
-        logger.debug(f"Workflow thread received command execution signal for task {task_id}.")
-        # Retrieve the result stored by the UI's execution thread
-        result = self.command_exec_results.get(task_id, (False, "Internal error: Result not found after wait."))
+        logger.debug(f"Backend thread for task {task_id} received signal. Retrieving result.")
 
-        # Clean up synchronization objects for this task ID
-        self.command_exec_events.pop(task_id, None)
-        self.command_exec_results.pop(task_id, None)
+        # Once the event is set, retrieve the result stored by the UI thread.
+        result = self.command_exec_results.pop(task_id, (False, "Result not found after execution."))
+        self.command_exec_events.pop(task_id, None) # Clean up
 
-        return result
+        # --- FIX: Ensure the second element of the tuple is always a valid JSON string ---
+        success, output_str = result
+        if not output_str.strip().startswith('{'):
+            try: # type: ignore
+                # If the output is not a JSON object (e.g., an error string), wrap it in a JSON structure.
+                error_json = json.dumps({
+                    "success": False,
+                    "exit_code": -1,
+                    "stdout": "",
+                    "stderr": output_str,
+                    "structured_error": None
+                })
+                return success, error_json
+            except Exception as e:
+                logger.exception(f"Error executing command for task {task_id} in backend thread: {e}")
+                return success, json.dumps({"success": False, "exit_code": -1, "stderr": str(e)})
 
+        return success, output_str
     def _display_command_task(self, data: Dict[str, Any]):
         """
         Creates the interactive UI widget for a command task within the 'Updates / Logs' display.
         This includes the description, command text, and Run/Copy buttons. This method
         runs on the main UI thread.
         """
-        """
-        Creates UI elements for a command task within the 'Updates / Logs' widget.
-        This method runs on the main UI thread.
-        """
         command = data.get("command", "")
         task_id = data.get("task_id", "")
-        auto_run_patterns = [
-            "-m venv venv", "pip install -r requirements.txt", "django-admin startproject",
-            "git init", "git add .", 'git commit -m "Initial project setup'
-        ]
-        if any(pattern in command for pattern in auto_run_patterns):
-            logger.info(f"Auto-executing setup command for task {task_id}: {command}")
-            self.add_message("System", f"Running setup: {command}")
-            event_to_signal = self.command_exec_events.get(task_id)
-            if event_to_signal:
-                exec_thread = threading.Thread(target=self._execute_command_ui_thread, args=(task_id, command, event_to_signal, None, None), daemon=True)
-                exec_thread.start()
-            else:
-                logger.error(f"Cannot auto-execute command for task {task_id}: No waiting event found.")
-            return
-
-        description = data.get("description")
-        widget = self.updates_display
-
-        if not all([task_id, command, description, widget, widget.winfo_exists()]):
-            logger.error(f"Missing data or widget to display command task: {data}")
+        description = data.get("description", "No description provided.")
+        if not all([task_id, command, description]):
+            logger.error(f"Missing data to display command task: {data}")
             event = self.command_exec_events.get(task_id)
             if event:
                 self.command_exec_results[task_id] = (False, "Internal error: Failed to display command task UI.")
                 event.set()
             return
 
+        # The parent widget is now the main updates display textbox.
+        parent_widget = self.updates_display
+
+        if not parent_widget or not parent_widget.winfo_exists():
+            logger.error(f"Command card frame does not exist. Cannot display command task {task_id}.")
+            event = self.command_exec_events.get(task_id)
+            if event:
+                self.command_exec_results[task_id] = (False, "Internal UI error: Command display area not found.")
+                event.set()
+            return
+
         try:
-            container_frame = ctk.CTkFrame(widget, fg_color=STATUS_COLORS["pending"], corner_radius=8)
-            # --- FIX: Use a grid layout to enforce consistent width ---
-            # Configure column 0 to expand, forcing the frame to fill horizontal space.
-            container_frame.grid_columnconfigure(0, weight=1)
-
-            # The inner frame holds all the card's content.
-            task_frame = ctk.CTkFrame(container_frame, fg_color="#333333", corner_radius=8)
-            # Place the inner frame in the expanding grid cell.
-            task_frame.grid(row=0, column=0, sticky="ew", padx=(4, 0), pady=0) # Use "ew" (east-west) for horizontal sticky
-
-            # Pack the entire card into the scrollable frame
-            container_frame.pack(fill=X, padx=10, pady=(10, 5))
+            # Create the card inside the scrollable frame.
+            task_frame = ctk.CTkFrame(parent_widget, fg_color="#2D2D3A", corner_radius=8, border_width=1, border_color=STATUS_COLORS["pending"])
+            task_frame.grid_columnconfigure(1, weight=1) # Allow description label to expand
 
             header_frame = ctk.CTkFrame(task_frame, fg_color="transparent")
-            header_frame.pack(fill=X, padx=15, pady=12)
+            header_frame.pack(fill=X, padx=15, pady=(12, 8))
+            header_frame.grid_columnconfigure(1, weight=1)
 
-            desc_frame = ctk.CTkFrame(header_frame, fg_color="transparent")
-            desc_frame.pack(side=LEFT, fill=X, expand=True)
+            status_icon_label = ctk.CTkLabel(header_frame, text="🕒", font=ctk.CTkFont(size=16))
+            status_icon_label.grid(row=0, column=0, sticky="w", padx=(0, 8))
 
-            status_icon_label = ctk.CTkLabel(desc_frame, text="🕒", font=ctk.CTkFont(size=16))
-            status_icon_label.pack(side=LEFT, padx=(0, 8))
+            # --- IMPROVEMENT 1: Enhance Task Title ---
+            desc_label = ctk.CTkLabel(header_frame, text=f"Task {task_id}: {description} (Sandbox Protected)", wraplength=parent_widget.winfo_width() - 250, justify=LEFT, font=ctk.CTkFont(weight="bold"))
+            desc_label.grid(row=0, column=1, sticky="w")
 
-            desc_label = ctk.CTkLabel(desc_frame, text=f"Task {task_id}: {description}", wraplength=widget.winfo_width() - 200, justify=LEFT, font=ctk.CTkFont(weight="bold"))
-            desc_label.pack(side=LEFT, fill=X, expand=True)
-
+            # --- NEW: Frame for the status badge ---
             status_badge_label = ctk.CTkLabel(header_frame, text="Pending", font=ctk.CTkFont(size=12, weight="bold"), fg_color=STATUS_COLORS["pending"], text_color="white", corner_radius=12)
-            status_badge_label.pack(side=RIGHT, padx=(10, 0), ipady=2, ipadx=8)
+            status_badge_label.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
+            # --- IMPROVEMENT 2: Enhance Sandbox Badge Visuals ---
+            sandbox_badge = ctk.CTkLabel(
+                header_frame,
+                text="🛡️ SANDBOX",  # All caps for emphasis
+                font=ctk.CTkFont(size=11, weight="bold"),
+                fg_color="#059669",  # Darker green for contrast
+                text_color="white",
+                corner_radius=6,
+                padx=8,
+                pady=2
+            )
+            sandbox_badge.grid(row=0, column=3, sticky="e", padx=(8, 0))
+            
+            # --- IMPROVEMENT 5: Add Tooltip to Sandbox Badge ---
+            ToolTip(
+                sandbox_badge,
+                "All commands run in an isolated sandbox with:\n"
+                "• Command whitelisting\n"
+                "• Path traversal prevention"
+            )
 
             body_frame = ctk.CTkFrame(task_frame, fg_color="transparent")
             body_frame.pack(fill=X, padx=15, pady=(0, 15))
 
             # --- Standardize Card Height ---
-            # Set a fixed height for the command textbox to ensure all cards have a uniform size.
-            # The textbox will automatically show a scrollbar if the command content is too long.
             fixed_command_box_height = 80
 
             cmd_textbox = ctk.CTkTextbox(
-                body_frame,
-                font=self.text_tags["code"]["font"],
+                body_frame, # type: ignore
+                font=("Consolas", 11),
                 fg_color="#1A1A1A",
                 border_width=0,
                 corner_radius=6,
-                height=fixed_command_box_height  # <-- ADD THIS LINE
+                height=fixed_command_box_height
             )
+            # --- FIX: Insert command first, then the colored icon ---
             cmd_textbox.insert("1.0", command)
+            cmd_textbox.tag_config("green_shield", foreground="#10B981")
+            cmd_textbox.insert("1.0", "🛡️ ", "green_shield")
+
             cmd_textbox.configure(state="disabled") # Make it read-only
             cmd_textbox.pack(fill=X, expand=True)
 
@@ -2116,34 +3432,23 @@ class MainWindow:
             button_container = ctk.CTkFrame(actions_frame, fg_color="transparent")
             button_container.pack(side=RIGHT)
 
-            def copy_cmd(button_ref: ctk.CTkButton, text_to_copy: str):
-                try:
-                    self.master.clipboard_clear()
-                    self.master.clipboard_append(text_to_copy)
-                    original_color = button_ref.cget("fg_color")
-                    button_ref.configure(text="Copied!", fg_color="#2ECC71")
-                    def restore_button():
-                        if button_ref.winfo_exists():
-                            button_ref.configure(text="Copy", fg_color=original_color)
-                    self.master.after(2000, restore_button)
-                except tk.TclError as e:
-                    logger.error(f"Clipboard error: {e}")
-                    button_ref.configure(text="Error")
-                    self.master.after(2000, lambda: button_ref.configure(text="Copy"))
-
-            copy_button = ctk.CTkButton(button_container, text="Copy", width=40, command=lambda: copy_cmd(copy_button, command), fg_color="transparent", border_color="#4A4A4A", border_width=1, hover_color="#555555")
+            copy_button = ctk.CTkButton(button_container, text="Copy", width=40, command=lambda: self.copy_with_animation(command, copy_button), fg_color="transparent", border_color="#4A4A4A", border_width=1, hover_color="#555555")
             copy_button.pack(side=LEFT, padx=(0, 10))
 
             run_button = ctk.CTkButton(button_container, text="Run Command", fg_color="#0078D4", hover_color="#0098FF", font=ctk.CTkFont(weight="bold"))
             run_button.pack(side=LEFT)
 
             ui_widgets = {
-                "container": container_frame, "status_icon": status_icon_label,
-                "status_badge": status_badge_label, "run_button": run_button,
-                "copy_button": copy_button,
+                "container": task_frame, "status_icon": status_icon_label,
+                "status_badge": status_badge_label, "run_button": run_button, "copy_button": copy_button
             }
 
-            run_button.configure(command=partial(self._trigger_command_execution, task_id, command, ui_widgets, copy_button))
+            # Configure button commands
+            run_button.configure(command=partial(self._trigger_command_execution, task_id, command, ui_widgets))
+
+            # Pack the new command card into the scrollable frame
+            task_frame.pack(fill=X, padx=10, pady=5) # type: ignore
+            self._scroll_updates_to_bottom()
 
         except Exception as e:
             logger.exception(f"Error displaying command task {task_id}: {e}")
@@ -2152,7 +3457,12 @@ class MainWindow:
                 self.command_exec_results[task_id] = (False, f"UI Error displaying command: {e}")
                 event.set()
 
-    def _trigger_command_execution(self, task_id: str, command: str, ui_widgets: Dict[str, ctk.CTkBaseClass], copy_button: ctk.CTkButton):
+    def _scroll_updates_to_bottom(self):
+        """Scrolls the updates_display scrollable frame to the bottom."""
+        if self.updates_display and self.updates_display.winfo_exists():
+            self.updates_display._parent_canvas.yview_moveto(1.0)
+
+    def _trigger_command_execution(self, task_id: str, command: str, ui_widgets: Dict[str, ctk.CTkBaseClass]):
         """
         Handles the 'Run Command' button click within an embedded task frame.
         It disables the UI for that task and starts the background execution thread
@@ -2172,389 +3482,85 @@ class MainWindow:
             return
         # Start the actual command execution in a separate thread
         logger.debug(f"Starting background thread for command execution: Task {task_id}")
-        exec_thread = threading.Thread(target=self._execute_command_ui_thread, args=(task_id, command, event_to_signal, ui_widgets, None), daemon=True)
+        exec_thread = threading.Thread(target=self._execute_command_ui_thread, args=(task_id, command, event_to_signal, ui_widgets), daemon=True)
         exec_thread.start()
 
-    def _execute_command_ui_thread(self, task_id: str, command: str, event_to_signal: threading.Event, ui_widgets: Dict[str, ctk.CTkBaseClass], skip_button: Optional[ctk.CTkButton]):
+    def _execute_command_ui_thread(self, task_id: str, command: str, event_to_signal: threading.Event, ui_widgets: Dict[str, ctk.CTkBaseClass]):
         """
-        The target function for the background thread that executes a single command.
-
-        It uses `subprocess.Popen` to run the command securely, streams its stdout/stderr
-        back to the UI via the queue, and finally stores the result and signals the
-        waiting `WorkflowManager` thread via the provided event.
-        """
-        """
-        Target function for the background thread that executes a command requested by the UI.
-        Uses subprocess.Popen with shell=False and a list of arguments.
-        Streams output via the UI queue.
-        Signals completion (success or failure) back to the waiting workflow thread via the event.
-
-        Args:
-            task_id: The unique ID for this command task.
-            command: The command string to execute (will be parsed).
-            event_to_signal: The threading.Event object to signal upon completion.
-            ui_widgets: A dictionary of UI widgets associated with the task card for state updates.
-            skip_button: Reference to the 'Skip' button widget (for UI updates).
+        Executes a command using the safe CommandExecutor and updates the UI.
+        This method runs in a background thread.
         """
         success = False
+        result_json = ""
         start_time = time.time()
 
-        # --- Update UI to "Running" state immediately ---
-        if ui_widgets:
-            updates = [
-                {"widget_ref": ui_widgets.get("container"), "config": {"fg_color": STATUS_COLORS["running"]}},
-                {"widget_ref": ui_widgets.get("status_icon"), "config": {"text": "⚙️"}},
-                {"widget_ref": ui_widgets.get("status_badge"), "config": {"text": "Running", "fg_color": STATUS_COLORS["running"]}},
-                {"widget_ref": ui_widgets.get("run_button"), "config": {"text": "Running...", "state": "disabled"}},
-                {"widget_ref": ui_widgets.get("copy_button"), "config": {"state": "disabled"}},
-            ]
-            self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_updates": updates}))
-
-        cwd_at_execution = str(self.command_executor.project_root) if self.command_executor else "Unknown"
-        return_code = -1 # Initialize return_code to a default failure value
-        # output = "" # This variable seems unused after the refactor. Consider removing.
-        # Initialize lists before the try block to ensure they are always defined
-        full_output_lines: List[str] = [] # Store all output lines for potential error reporting
-        stdout_lines: List[str] = [] # Initialize stdout lines list
-        stderr_lines: List[str] = [] # Initialize stderr lines list
-        popen_args: List[str] = [] # Initialize popen_args list
-        process = None # Initialize process variable
-        command_parts: List[str] = [] # Initialize command_parts
-        structured_error: Optional[Dict[str, Any]] = None # For structured error JSON
-
-        # --- NEW: Check for noisy commands to suppress verbose UI output ---
-        is_pip_install = "pip" in command and "install" in command
-
-        # --- Stream Output via UI Queue ---
-        def stream_output_line(line: str, is_stderr: bool = False):
-            log_prefix = "[CMD ERR]" if is_stderr else "[CMD OUT]"
-            # Suppress verbose pip install logs from the UI, but still log them to the console/file
-            if is_pip_install and not ("Successfully installed" in line or "Collecting" in line or is_stderr):
-                logger.debug(f"UI_SUPPRESSED {log_prefix} {line}")
-            else:
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"command_output": f"{log_prefix} {line}"}))
-            full_output_lines.append(f"{log_prefix} {line}")
-        # --- END NEW ---
+        # --- Update UI to "Running" state ---
+        def update_card_state(icon, badge_text, color, button_text, button_state="disabled"):
+            ui_widgets["status_icon"].configure(text=icon)
+            ui_widgets["status_badge"].configure(text=badge_text, fg_color=color)
+            ui_widgets["container"].configure(border_color=color)
+            ui_widgets["run_button"].configure(text=button_text, state=button_state)
+            ui_widgets["copy_button"].configure(state=button_state)
 
         try:
             if not self.command_executor:
-                raise RuntimeError("CommandExecutor component is not initialized.")
-            if not self.command_executor.project_root:
-                raise RuntimeError("CommandExecutor project root is not set.")
+                raise RuntimeError("CommandExecutor is not initialized.")
 
-            # --- Prepare Command Execution ---
-            original_command_string = command.strip()
-            if not original_command_string:
-                raise ValueError("Command string is empty.")
-
-            try:
-                is_windows = platform.system() == "Windows"
-                command_parts = shlex.split(original_command_string, posix=not is_windows)
-                if not command_parts: raise ValueError("Command string resulted in empty parts after parsing.")
-            except ValueError as parse_e:
-                raise ValueError(f"Invalid command format: {parse_e}") from parse_e
-            # --- Apply CommandExecutor's venv logic to command_parts ---
-            if self.command_executor and command_parts:
-                command_key_to_check = self.command_executor._get_base_command_key(command_parts[0])
-                # Commands that should prefer venv executables
-                if command_key_to_check in ["python", "pip", "django-admin", "gunicorn", "flask"]: # Added flask
-                    venv_exe_path = self.command_executor._get_venv_executable(command_key_to_check)
-                    if venv_exe_path:
-                        logger.info(f"UI Executor: Using venv executable for '{command_key_to_check}': {venv_exe_path}")
-                        command_parts[0] = str(venv_exe_path)
-                    else:
-                        logger.warning(f"UI Executor: Venv not found or '{command_key_to_check}' not in venv. Using system command '{command_parts[0]}'.")
-            # --- End venv logic application ---
-
-            # --- ALWAYS USE shell=False ---
-            needs_shell = False
-            popen_args: List[str] = command_parts
-            cwd = self.command_executor.project_root
-
-            # --- Calculate command_key FIRST ---
-            # This needs to happen before checking against windows_builtins or restricted commands
-            command_key = self.command_executor._get_base_command_key(command_parts[0])
-
-            # --- Basic Pre-Validation for UI-triggered commands ---
-            # Block shell pipelines if shell=False is intended (which it always is now)
-            # Check the original string as shlex might parse pipes differently depending on context
-            if any(char in original_command_string for char in ['|', '>', '<', '&&', '||', ';']):
-                logger.error(f"Blocked UI command: Contains shell metacharacters: {original_command_string}")
-                raise ValueError(f"Test step command contains shell metacharacters and is not allowed: {original_command_string}")
-
-            # Check against CommandExecutor's restricted list for manage.py
-            if command_key == "python" and len(command_parts) > 2 and command_parts[1] == "manage.py":
-                sub_command = command_parts[2]
-                if sub_command in self.command_executor.restricted_manage_py:
-                    logger.error(f"Blocked UI command: Restricted manage.py subcommand '{sub_command}' in '{original_command_string}'")
-                    raise ValueError(f"Test step command uses a restricted manage.py subcommand: {sub_command}")
-            # --- End Basic Pre-Validation ---
-
-            # --- FIX for Windows Built-ins with shell=False ---
-            # Prepend 'cmd /c' for known Windows shell built-ins
-            windows_builtins = {"dir", "type", "echo", "copy", "move", "del", "mkdir", "rmdir"}
-            if is_windows and command_key in windows_builtins:
-                logger.info(f"Prepending 'cmd /c' for Windows built-in command: {command_key}")
-                # Prepend 'cmd' and '/c' to the beginning of the argument list
-                popen_args = ['cmd', '/c'] + popen_args
-
-            # --- NEW: Proactively create .gitignore BEFORE git init runs ---
-            if 'git init' in command and self.project_root and not (Path(self.project_root) / ".gitignore").exists():
-                logger.info("Command is 'git init', proactively creating .gitignore file before execution.")
-                try:
-                    if self.file_system_manager:
-                        gitignore_content = """# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class$
-
-# Virtual Environments
-venv/
-.venv/
-"""
-                        self.file_system_manager.write_file(".gitignore", gitignore_content)
-                        self.add_message("System", "Created .gitignore to exclude venv and other temporary files.")
-                except Exception as e:
-                    logger.error(f"Failed to create .gitignore file before git init: {e}", exc_info=True)
-                    self.add_message("System", f"Warning: Failed to create .gitignore file: {e}", tag="warning")
-
-            # --- Ensure paths for specific commands are correctly formatted using pathlib ---
-            # Check if it's the py_compile command
-            is_py_compile_cmd = (command_key == "python" and len(command_parts) >= 4 and
-                                 command_parts[1] == "-m" and command_parts[2] == "py_compile")
-
-            if is_py_compile_cmd:
-                try:
-                    path_arg_index_in_command_parts = 3 # Path is the 4th element in the original command_parts
-                    
-                    path_arg_in_popen_args_index = path_arg_index_in_command_parts
-                    if popen_args[0:2] == ['cmd', '/c']: # Check if 'cmd /c' was prepended
-                        path_arg_in_popen_args_index += 2
-                    
-                    if path_arg_in_popen_args_index < len(popen_args):
-                        original_path_arg_from_popen = popen_args[path_arg_in_popen_args_index]
-                        if self.command_executor: # Make sure command_executor is available
-                            resolved_path_obj = (self.command_executor.project_root / original_path_arg_from_popen).resolve()
-                            resolved_path_obj.relative_to(self.command_executor.project_root)
-                            formatted_path = str(resolved_path_obj) 
-                            popen_args[path_arg_in_popen_args_index] = formatted_path
-                            logger.info(f"Using resolved absolute path for py_compile (shell=False): '{formatted_path}' from original '{original_path_arg_from_popen}'")
-                        else:
-                            logger.warning("CommandExecutor not available in UI thread for py_compile path resolution. Using original path.")
-                    else:
-                        logger.warning(f"Path argument index {path_arg_in_popen_args_index} out of bounds for py_compile in popen_args: {popen_args}")
-
-                except (ValueError, IndexError) as e: # Added IndexError
-                    logger.warning(f"Could not process path argument for py_compile: {e}")
+            # --- DELEGATE EXECUTION TO COMMAND_EXECUTOR ---
+            # The command_executor handles validation, venv, timeouts, and secure execution.
+            # Its internal `read_stream` will log stdout/stderr to the console.
+            # We will also stream it to the UI.
             
-            is_type_cmd_windows = (platform.system() == "Windows" and
-                                   len(command_parts) == 2 and
-                                   (command_parts[0].lower() == "type" or command_parts[0].lower() == "type.exe")) 
-            
-            if is_type_cmd_windows:
-                original_path_arg_index_in_command_parts = 1
-                path_arg_in_popen_args_index = original_path_arg_index_in_command_parts
-                if popen_args[0:2] == ['cmd', '/c']:
-                     path_arg_in_popen_args_index += 2 
-                
-                if path_arg_in_popen_args_index < len(popen_args):
-                    original_path_arg_from_popen = popen_args[path_arg_in_popen_args_index]
-                    try:
-                        if self.command_executor: # Ensure command_executor is available
-                            # For 'type', we want to resolve the path fully and ensure it's within project root
-                            resolved_path_obj = (self.command_executor.project_root / original_path_arg_from_popen).resolve()
-                            resolved_path_obj.relative_to(self.command_executor.project_root) # Security check
-                            # Format for Windows 'type' command (backslashes)
-                            formatted_path = str(resolved_path_obj).replace('/', '\\')
-                            popen_args[path_arg_in_popen_args_index] = formatted_path
-                            logger.info(f"Using resolved path with backslashes for 'type' (shell=False): '{formatted_path}' from original '{original_path_arg_from_popen}'")
-                        else:
-                            # Fallback if command_executor is not available (less ideal)
-                            logger.warning("CommandExecutor not available for 'type' path resolution. Using original path with backslash normalization.")
-                            formatted_path = original_path_arg_from_popen.replace('/', '\\')
-                            popen_args[path_arg_in_popen_args_index] = formatted_path
-                    except ValueError as ve: # Path outside root
-                        logger.error(f"Path for 'type' '{original_path_arg_from_popen}' resolves outside project root: {ve}. Command will likely fail.")
-                        # Let it proceed, Popen will likely fail with FileNotFoundError
-                    except Exception as e: # Other path processing errors
-                        logger.warning(f"Could not resolve/normalize path argument '{original_path_arg_from_popen}' for 'type': {e}. Using original with backslashes.")
-                        popen_args[path_arg_in_popen_args_index] = original_path_arg_from_popen.replace('/', '\\') # Fallback
-                else:
-                    logger.warning(f"Path argument index {path_arg_in_popen_args_index} out of bounds for 'type' in popen_args: {popen_args}")
+            # Queue the UI update to be done on the main thread
+            self.master.after(0, lambda: update_card_state("⏳", "Running", STATUS_COLORS["running"], "Running..."))
 
-            # --- FIX for Windows 'dir' command path arguments ---
-            is_dir_cmd_windows = (platform.system() == "Windows" and
-                                  len(command_parts) >= 1 and # dir can have 0 or 1 path arg
-                                  (command_parts[0].lower() == "dir" or command_parts[0].lower() == "dir.exe"))
+            # The `execute` method returns a CommandResult object.
+            result = self.command_executor.execute(command)
+            success = result.success
 
-            if is_dir_cmd_windows and len(popen_args) > (2 if popen_args[0:2] == ['cmd', '/c'] else 0): # Check if there's a path arg
-                path_arg_idx_in_popen = -1
-                # Find the path argument (it's usually the last non-flag argument)
-                for i_arg in range(len(popen_args) -1, 0, -1): # Iterate backwards from end
-                    if not popen_args[i_arg].startswith(('-', '/')): # Not a flag
-                        path_arg_idx_in_popen = i_arg
-                        break
-                
-                if path_arg_idx_in_popen != -1:
-                    original_dir_path_arg = popen_args[path_arg_idx_in_popen]
-                    # Normalize slashes to backslashes and remove trailing slash for 'dir'
-                    normalized_dir_path = original_dir_path_arg.replace('/', '\\').rstrip('\\')
-                    if normalized_dir_path != original_dir_path_arg:
-                        popen_args[path_arg_idx_in_popen] = normalized_dir_path
-                        logger.info(f"Normalized path for 'dir' command: '{original_dir_path_arg}' -> '{normalized_dir_path}'")
-            # --- End FIX for Windows 'dir' ---
+            # Stream final output to UI
+            self.update_progress_safe({"command_output": f"--- Command Finished: {command} ---"})
+            if result.stdout:
+                self.update_progress_safe({"command_output": f"STDOUT:\n{result.stdout}"})
+            if result.stderr:
+                self.update_progress_safe({"command_output": f"STDERR:\n{result.stderr}"})
+            self.update_progress_safe({"command_output": f"--- Exit Code: {result.exit_code} ---"})
 
+            # Prepare JSON result for the workflow manager
+            result_json = result.model_dump_json()
 
-            # Platform-specific startup info to hide console window on Windows
-            startupinfo = None
-            creationflags = 0
-            if is_windows:
-                startupinfo = subprocess.STARTUPINFO()
-                startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
-                startupinfo.wShowWindow = subprocess.SW_HIDE
-                creationflags = subprocess.CREATE_NO_WINDOW
-
-            logger.info(f"Executing command in thread: {repr(popen_args)} (Shell={needs_shell}) in CWD: {cwd}")
-            stream_output_line(f"Executing: {' '.join(map(shlex.quote, popen_args))}", is_stderr=False) # Log start
-
-            # --- Start Subprocess ---
-            process = subprocess.Popen(
-                popen_args, # Pass the potentially modified list of arguments
-                cwd=cwd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                encoding=sys.stdout.encoding or 'utf-8',
-                errors='replace',
-                bufsize=1,
-                shell=needs_shell, # Always False
-                startupinfo=startupinfo,
-                creationflags=creationflags
-            )
-
-            # --- Read Output Streams in Separate Threads ---
-            def read_stream(stream, output_list_param, is_stderr_param): # Added params for the specific list and type
-                try:
-                    if stream:
-                        for line in iter(stream.readline, ''):
-                            stripped_line = line.strip()
-                            stream_output_line(stripped_line, is_stderr_param) # Log to UI queue and full_output_lines
-                            output_list_param.append(stripped_line) # Append to the specific list (stdout_lines or stderr_lines)
-                        stream.close()
-                except Exception as read_err:
-                    logger.error(f"Error reading command output stream: {read_err}")
-                    # Also log this error to the specific output list if possible
-                    error_line = f"[Error reading stream: {read_err}]"
-                    stream_output_line(error_line, is_stderr=True) # Log to UI queue and full_output_lines
-                    output_list_param.append(error_line) # Append error to the specific list
-
-            stdout_thread = threading.Thread(target=read_stream, args=(process.stdout, stdout_lines, False), daemon=True)
-            stderr_thread = threading.Thread(target=read_stream, args=(process.stderr, stderr_lines, True), daemon=True)
-            stdout_thread.start()
-            stderr_thread.start()
-
-            stdout_thread.join()
-            stderr_thread.join()
-
-            return_code = process.wait()
-            logger.info(f"Command process for task {task_id} finished with exit code {return_code}.")
-            # Initialize command_is_makemigrations_check before the conditional block
-            command_is_makemigrations_check = "manage.py" in command and \
-                                            "makemigrations" in command and \
-                                            "--check" in command
-
-            # --- Check Exit Code ---
-
-            if command_is_makemigrations_check and return_code in [0, 1]:
-
-                success = True
-                output_message_detail = "No changes detected." if return_code == 0 else "Changes detected, migrations would be made."
-                output = f"Command 'makemigrations --check' completed (Exit Code {return_code}): {output_message_detail}"
-                stream_output_line(f"--- Execution 'makemigrations --check' considered successful (Exit Code: {return_code}): {output_message_detail} ---", is_stderr=False)
-            elif return_code == 0:
-                success = True
-                output = f"Command completed successfully (Exit Code 0)."
-                stream_output_line("--- Execution Successful ---", is_stderr=False)
-                if ui_widgets:
-                    # Update UI to "Success" state
-                    self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("container"), "config": {"fg_color": STATUS_COLORS["success"]}}))
-                    self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_icon"), "config": {"text": "✅"}}))
-                    self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_badge"), "config": {"text": "Success", "fg_color": STATUS_COLORS["success"]}}))
+            # --- Update UI based on final result ---
+            if success:
+                self.master.after(0, lambda: update_card_state("✅", "Success", STATUS_COLORS["success"], "✅ Success"))
             else:
-                success = False # type: ignore
-                full_log = "\n".join(full_output_lines)
-                # Attempt to parse a structured error from stderr
-                structured_error = self._parse_python_traceback("\n".join(stderr_lines))
-                output = f"Command failed with Exit Code {return_code}.\n--- Output Log ---\n{full_log}\n--- End Log ---"
-                stream_output_line(f"--- Execution Failed (Exit Code: {return_code}) ---", is_stderr=True)
-                if ui_widgets:
-                    # Update UI to "Remediating" state
-                    self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("container"), "config": {"fg_color": STATUS_COLORS["remediating"]}}))
-                    self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_icon"), "config": {"text": "🛠️"}})) # Wrench icon
-                    self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_badge"), "config": {"text": "Remediating...", "fg_color": STATUS_COLORS["remediating"]}}))
+                self.master.after(0, lambda: update_card_state("❌", "Check Needed", STATUS_COLORS["error"], "❌ Check Needed"))
 
-        except FileNotFoundError:
+        except (ValueError, FileNotFoundError, InterruptedError, PatchApplyError) as e:
+            # Catch validation, interruption, or other pre-execution errors from CommandExecutor
             success = False
-            # Ensure command_parts is defined before accessing index 0
-            executable_name = command_parts[0] if command_parts else "Unknown executable"
-            output = f"Command execution error: Executable '{executable_name}' not found. Is it installed and in PATH?"
-            logger.error(output)
-            stream_output_line(f"--- Execution Error: {output} ---", is_stderr=True)
-            if ui_widgets:
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("container"), "config": {"fg_color": STATUS_COLORS["error"]}}))
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_badge"), "config": {"text": "Error", "fg_color": STATUS_COLORS["error"]}}))
-        except InterruptedError as e:
-            success = False
-            output = f"Command execution cancelled: {e}"
-            logger.warning(f"Command execution thread cancelled for task {task_id}: {e}")
-            if ui_widgets:
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_badge"), "config": {"text": "Cancelled", "fg_color": STATUS_COLORS["error"]}}))
-        except ValueError as e: # Catch validation errors (e.g., blocked commands)
-            success = False
-            output = f"Command blocked or invalid: {e}"
-            logger.error(f"Command execution blocked for task {task_id}: {e}")
-            stream_output_line(f"--- Execution Blocked: {e} ---", is_stderr=True)
-            if ui_widgets:
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("container"), "config": {"fg_color": STATUS_COLORS["error"]}}))
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_badge"), "config": {"text": "Blocked", "fg_color": STATUS_COLORS["error"]}}))
+            error_message = f"Command execution failed: {e}"
+            logger.error(f"Error executing command for task {task_id}: {error_message}", exc_info=True)
+            self.update_progress_safe({"error": error_message})
+            result_json = json.dumps({
+                "command_str": command, "success": False, "exit_code": -1,
+                "stdout": "", "stderr": str(e), "structured_error": None
+            })
+            self.master.after(0, lambda: update_card_state("🚫", "Blocked", STATUS_COLORS["error"], "Blocked")) # "Blocked" is a good neutral term
+
         except Exception as e:
             success = False
-            full_log = "\n".join(full_output_lines)
-            output = f"Command execution error: {e}\n--- Output Log ---\n{full_log}\n--- End Log ---"
-            logger.exception(f"Command execution thread failed for task {task_id}: {e}")
-            stream_output_line(f"--- Execution Error: {e} ---", is_stderr=True)
-            if ui_widgets:
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("container"), "config": {"fg_color": STATUS_COLORS["error"]}}))
-                self.ui_queue.put((QUEUE_MSG_UPDATE_UI, {"internal_update": True, "widget_ref": ui_widgets.get("status_badge"), "config": {"text": "Error", "fg_color": STATUS_COLORS["error"]}}))
+            error_message = f"An unexpected error occurred during command execution: {e}"
+            logger.exception(f"Unexpected error in command execution thread for task {task_id}")
+            self.update_progress_safe({"error": error_message})
+            result_json = json.dumps({
+                "command_str": command, "success": False, "exit_code": -1,
+                "stdout": "", "stderr": str(e), "structured_error": None
+            })
+            self.master.after(0, lambda: update_card_state("❌", "Issue", STATUS_COLORS["error"], "Issue"))
 
         finally:
-            if process and process.poll() is None:
-                try:
-                    logger.warning(f"Command process for task {task_id} still running after completion. Terminating.")
-                    process.terminate()
-                    process.wait(timeout=1)
-                    if process.poll() is None:
-                        process.kill()
-                        process.wait(timeout=1)
-                except Exception as kill_e:
-                    logger.error(f"Error terminating command process for task {task_id}: {kill_e}")
-
-            end_time = time.time()
-            # Store comprehensive execution details
-            execution_details = {
-                "command_str": command, # The original command string passed to this function
-                "executed_as": ' '.join(map(shlex.quote, popen_args)) if popen_args else command,
-                "success": success,
-                "exit_code": return_code if process else -1,
-                "stdout": "\n".join(stdout_lines).strip(), # Capture from lists, #Fixed: Added a comma here.
-                "stderr": "\n".join(stderr_lines).strip(), # Capture from lists
-                "structured_error": structured_error, # Add structured error to the result
-                "start_time": start_time,
-                "end_time": end_time,
-                "cwd": cwd_at_execution
-            }
-            logger.debug(f"Storing command result for task {task_id}. Details: {execution_details}")
-            self.command_exec_results[task_id] = (success, json.dumps(execution_details)) # Serialize dict to string for output
+            # --- Signal completion to the waiting workflow thread ---
+            self.command_exec_results[task_id] = (success, result_json)
             event_to_signal.set()
             logger.debug(f"Event signaled for task {task_id}.")
 
@@ -2606,71 +3612,13 @@ venv/
 
         return {"errorType": error_type, "message": error_message, "stack": stack}
 
-    def manage_api_keys(self):
-        """Handles the 'Manage API Keys' menu action, allowing users to update or clear stored keys."""
-        """Allows the user to enter or clear API keys for all configured providers."""
-        if self.is_running:
-            messagebox.showwarning("Busy", "Cannot manage API keys while a task is running.", parent=self.master)
-            return
-        if not self.config_manager:
-            messagebox.showerror("Error", "Configuration Manager not initialized.", parent=self.master)
-            return
-        
-        keys_changed = False # Flag to trigger re-initialization
-
-        for provider_id, data in self.config_manager.providers_config.items():
-            key_name = data.get("api_key_name") # type: ignore
-            display_name = data.get("display_name", provider_id)
-            if not key_name:
-                continue
-
-            existing_key = retrieve_credential(key_name)
-            action = "Update/Clear" if existing_key else "Enter"
-
-            new_key = simpledialog.askstring(
-                f"{action} API Key for {display_name}",
-                f"Paste your API Key for {display_name}.\n"
-                f"Leave blank and click OK to clear the stored key.",
-                initialvalue=existing_key if existing_key else "", # type: ignore
-                show='*',
-                parent=self.master
-            )
-
-            if new_key is not None: # User clicked OK
-                new_key_stripped = new_key.strip()
-                if new_key_stripped:
-                    if new_key_stripped != existing_key:
-                        try:
-                            store_credential(key_name, new_key_stripped)
-                            logger.info(f"Stored new API Key for {display_name}.")
-                            keys_changed = True
-                        except Exception as e:
-                            logger.exception(f"Failed to store API Key for {display_name}.")
-                            messagebox.showerror("Storage Error", f"Failed to store key for {display_name}: {e}", parent=self.master)
-                elif existing_key: # User entered blank, intending to clear an existing key
-                    if delete_credential(key_name):
-                        logger.info(f"Cleared stored API Key for {display_name}.")
-                        keys_changed = True
-                    else:
-                        messagebox.showerror("Error", f"Failed to clear key for {display_name}. Check logs.", parent=self.master)
-            else: # User clicked cancel
-                break # Stop asking for other keys if user cancels one
-
-        if keys_changed:
-            messagebox.showinfo("Keys Updated", "API keys have been updated. Re-initializing agents.", parent=self.master)
-            self.add_message("System", "API keys updated. Re-initializing agents...")
-            # Force re-initialization if token changed
-            self.status_var.set("Re-initializing agents after token update...")
-            self._set_ui_running_state(True)
-            self.master.after(50, self._initialize_core_stage2) # Trigger re-init
-
     def show_about_dialog(self):
         """Displays the 'About' dialog box with application information."""
         """Displays the About dialog box."""
         messagebox.showinfo(
             "About Vebgen AI Agent",
             "Vebgen - AI Agent Development Application\n\n"
-            "Version: 0.1.0\n"            "Developed by: Vebgen Team\n\n"
+            "Version: 0.2\n"            "Developed by: Vebgen Team\n\n"
             "This tool uses AI agents to assist with software development tasks.",
             parent=self.master
         )

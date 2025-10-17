@@ -95,8 +95,7 @@ class ConfigManager:
                 if entry.is_dir():
                     # Check for the required files within the directory
                     init_file = entry / '__init__.py'
-                    prompts_file = entry / 'prompts.py'
-                    if init_file.is_file() and prompts_file.is_file():
+                    if init_file.is_file():
                         # If both files exist, add the directory name to the list of frameworks.
                         frameworks.append(entry.name)
                         logger.info(f"Found valid framework plugin: '{entry.name}'.")
@@ -104,7 +103,6 @@ class ConfigManager:
                         # Log why a directory might be skipped (useful for debugging).
                         missing = []
                         if not init_file.is_file(): missing.append("'__init__.py'")
-                        if not prompts_file.is_file(): missing.append("'prompts.py'")
                         logger.debug(f"Directory '{entry.name}' skipped. Missing: {', '.join(missing)}.")
         except OSError as e:
             logger.error(f"Error scanning plugins directory '{self.plugins_dir}': {e}")
@@ -191,7 +189,7 @@ class ConfigManager:
             # The loaded data is already the correct FrameworkPrompts type.
             return prompts_data_instance
 
-        except (ImportError, AttributeError, ValueError) as e:
+        except (ImportError, AttributeError, ValueError, TypeError) as e:
              # Catch specific errors related to loading and validation.
              logger.exception(f"Error loading or validating prompts data for '{framework}' from {prompts_file_path}.")
              raise ValueError(f"Invalid prompts data or module for framework '{framework}': {e}") from e
@@ -288,7 +286,10 @@ class ConfigManager:
                     models.append({"display": f"{model_name} - {provider_name}", "id": full_model_id, "provider": pid})
         elif provider_id in self.providers_config:
             data = self.providers_config[provider_id]
+            provider_name = data.get("display_name", provider_id)
             for model_name in data.get("models", []):
                 full_model_id = f"{data.get('client_config', {}).get('model_prefix', '')}{model_name}"
-                models.append({"display": model_name, "id": full_model_id, "provider": provider_id})
+                # When a specific provider is selected, still show the provider name for clarity, especially for OpenRouter.
+                display_name = f"{model_name} - {provider_name}" if provider_id == "openrouter" else model_name
+                models.append({"display": display_name, "id": full_model_id, "provider": provider_id})
         return sorted(models, key=lambda x: x['display'])
