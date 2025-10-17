@@ -23,7 +23,7 @@
 
 🌐 **Website**: [vebgen.dev](https://vebgen.dev) *(coming soon)*
 
-[✨ Features](#-key-features) • [🆚 Why Different?](#-how-is-vebgen-different-from-copilot-or-cursor) • [🚀 Quick Start](#-quick-start) • [📚 Docs Hub](docs/ARCHITECTURE.md) • [ Discord](https://discord.gg/K6ahYcTyca) • [🗺️ Roadmap](#-roadmap) • [🤝 Contributing](#-contributing)
+[✨ Features](#-key-features) • [🆚 Why Different?](#-how-is-vebgen-different-from-copilot-or-cursor) • [🚀 Quick Start](#-quick-start) • [📚 Docs Hub](ARCHITECTURE.md) • [ Discord](https://discord.gg/K6ahYcTyca) • [🗺️ Roadmap](#-roadmap) • [🤝 Contributing](#-contributing)
 
 </div>
 
