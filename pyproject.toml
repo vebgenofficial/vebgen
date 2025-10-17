@@ -44,7 +44,7 @@ dependencies = [
 "Bug Tracker" = "https://github.com/vebgenofficial/vebgen/issues"
 
 [project.scripts]
-vebgen = "main:main"
+vebgen = "src.main:main"
 
 [project.optional-dependencies]
 django = ["Django"]
