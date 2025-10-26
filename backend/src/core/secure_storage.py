@@ -1,4 +1,4 @@
-# src/core/secure_storage.py
+# backend/src/core/secure_storage.py
 import logging
 import keyring # Needs: pip install keyring
 # Consider installing a backend if needed (e.g., pip install keyrings.cryptfile)

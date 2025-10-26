@@ -1,6 +1,7 @@
 # backend/src/core/adaptive_agent.py
 import json
 import logging
+from json_repair import repair_json
 import re
 from datetime import datetime
 import asyncio
@@ -22,6 +23,7 @@ from .security_utils import sanitize_and_validate_input
 from .exceptions import InterruptedError
 from .adaptive_prompts import (
     TARS_FEATURE_BREAKDOWN_PROMPT,
+    CASE_FRONTEND_STANDARDS,
     TARS_VERIFICATION_PROMPT,
     CASE_NEXT_STEP_PROMPT,
     TARS_CHECKPOINT_PROMPT,
@@ -29,6 +31,7 @@ from .adaptive_prompts import (
 )
 
 # Type Hints for UI Callbacks
+from .validators.frontend_validator import FrontendValidator
 ShowInputPromptCallable = Callable[[str, bool, Optional[str]], Optional[str]]
 ShowFilePickerCallable = Callable[[str], Optional[str]]
 
@@ -98,21 +101,26 @@ class TarsPlanner:
         verification_result_raw = response.get("content", "").strip()
 
         try:
-            # The LLM may wrap the JSON in markdown fences, so we robustly search for it.
-            json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", verification_result_raw, re.DOTALL)
-            if json_match:
-                verification_result = json_match.group(1)
-            else:
-                # Fallback for responses that are just the JSON object without fences
-                json_match = re.search(r"\{.*\}", verification_result_raw, re.DOTALL)
-                if json_match:
-                    verification_result = json_match.group(0)
-                else:
-                    verification_result = verification_result_raw
-
-            if not json_match:
-                raise json.JSONDecodeError("No JSON object found in the response.", verification_result, 0)
-            data = json.loads(json_match.group(0))
+            data = None
+            try:
+                # First, try standard parsing with leniency for control characters.
+                data = json.loads(verification_result_raw, strict=False)
+            except json.JSONDecodeError:
+                # If that fails, try to find a JSON block inside markdown fences.
+                json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", verification_result_raw, re.DOTALL)
+                json_str_to_parse = json_match.group(1) if json_match else verification_result_raw
+                
+                self.logger.warning("TARS verification JSON decode failed, attempting repair.")
+                try:
+                    # Repair the JSON string.
+                    repaired_json = repair_json(json_str_to_parse)
+                    data = json.loads(repaired_json)
+                    self.logger.info("✅ Successfully repaired malformed TARS verification JSON")
+                except Exception as repair_error:
+                    self.logger.error(f"TARS JSON repair also failed: {repair_error}")
+                    raise
+            if not data:
+                raise json.JSONDecodeError("Could not parse or repair JSON from TARS response.", verification_result_raw, 0)
             completion = data.get("completion_percentage", 0)
             issues = data.get("issues", ["Verification agent returned invalid data."])
             self.logger.info(f"TARS Verification: {completion}% complete. Issues: {issues if issues else 'None'}")
@@ -262,6 +270,7 @@ class AdaptiveAgent:
             framework_rules_str, code_context_str, work_history_str, content_availability_note = await self.context_manager.get_context_for_prompt()
 
             prompt_content = CASE_NEXT_STEP_PROMPT.format(
+                frontend_development_standards=CASE_FRONTEND_STANDARDS,
                 feature_description=feature_description,
                 tech_stack=self.tech_stack,
                 content_availability_instructions=CONTENT_AVAILABILITY_INSTRUCTIONS,
@@ -286,20 +295,31 @@ class AdaptiveAgent:
             response_text = response_cm["content"]
             action_json = self._parse_json_response(response_text)
 
-            if not action_json or not action_json.get("action"):
-                self.logger.warning(
-                    f"Could not parse LLM response or find action: {response_text}"
-                )
-                self.context_manager.add_work_history("System: Failed to decide next step. Retrying.")
-                # If the LLM response isn't valid JSON, we don't just fail. We provide
-                # feedback to the LLM and ask it to correct its output format.
-                correction_instructions = (
-                    "Your previous response was not valid JSON and could not be parsed. "
-                    "You MUST respond with a single, valid JSON object containing 'thought', 'action', and 'parameters'. "
-                    "Ensure all string content within the JSON, especially multi-line code, is properly escaped."
-                )
+            if not action_json:
+                self.logger.warning(f"Could not parse LLM response: {response_text[:200]}")
+                
+                # Try to diagnose the specific JSON issue for better feedback.
+                if '\\n' in response_text and '\\\\n' not in response_text:
+                    correction_instructions = (
+                        "Your previous response had UNESCAPED NEWLINES in the JSON. "
+                        "Remember: inside JSON strings, newlines must be \\\\n (double backslash + n), not \\n. "
+                        "Example: \"patch\": \"<<<<<<< SEARCH\\\\ncode\\\\n=======\" "
+                        "Please try again with properly escaped newlines."
+                    )
+                else:
+                    correction_instructions = (
+                        "Your previous response was not valid JSON and could not be parsed. "
+                        "You MUST respond with a single, valid JSON object containing 'thought', 'action', and 'parameters'. "
+                        "Ensure all string content within the JSON is properly escaped (use \\\\n for newlines, \\\" for quotes)."
+                    )
                 continue
             
+            if not action_json.get("action"):
+                self.logger.warning("LLM response missing required 'action' field")
+                self.context_manager.add_work_history("System: Failed to decide next step (missing 'action'). Retrying.")
+                correction_instructions = "Your JSON was parsed successfully but is missing the required 'action' field. Please include it."
+                continue
+
             action = action_json.get("action")
 
             parameters = action_json.get("parameters", {})
@@ -351,38 +371,12 @@ class AdaptiveAgent:
                         self.file_system_manager.read_file, filepath
                     )
                     
-                    lines = raw_content.splitlines()
+                    lines = raw_content.splitlines() # Still useful for getting line count
+                    formatted_content = textwrap.dedent(f"""
+                    ## FULL CONTENT: {filepath} ({len(lines)} lines)
                     
-                    # Only add line numbers for manageable files to avoid excessive context.
-                    if len(lines) <= 500:
-                        formatted_lines = [f"{i:4d} │{line}" for i, line in enumerate(lines, start=1)]
-                        formatted_content = textwrap.dedent(f"""
-                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                            📄 FULL CONTENT: {filepath} ({len(lines)} lines)
-                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-                            ⚠️  Line numbers (before │) are for REFERENCE ONLY
-                               • Use these in your @@ -X,Y +X,Z @@ headers
-                               • Do NOT include line numbers in diff content
-
-                            {'\n'.join(f'                            {line}' for line in formatted_lines)}
-
-                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                        """)
-                    else:
-                        # For large files, skip line numbers to conserve context space.
-                        self.logger.info(f"File '{filepath}' is large ({len(lines)} lines). Skipping line number formatting for context.")
-                        formatted_content = textwrap.dedent(f"""
-                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                            📄 FULL CONTENT: {filepath} ({len(lines)} lines)
-                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-                            NOTE: Line numbers have been omitted as the file is large.
-
-                            {raw_content}
-
-                            ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                        """)
+                    {raw_content}
+                    """).strip()
                     
                     # Set the full content in the context manager for the next turn
                     self.context_manager.set_requested_full_content(formatted_content)
@@ -413,7 +407,20 @@ class AdaptiveAgent:
             # This logic detects A -> B -> A patterns, which indicate a stuck loop.
             if len(recent_action_signatures_for_cycle_detection) > 1 and current_action_signature == recent_action_signatures_for_cycle_detection[-2] and current_action_signature != recent_action_signatures_for_cycle_detection[-1]:
                 self.logger.critical(f"Circuit Breaker: Repetitive action cycle detected: {recent_action_signatures_for_cycle_detection[-2:] + [current_action_signature]}. Escalating failure.")
-                raise RuntimeError(f"Repetitive action cycle detected: {' -> '.join(recent_action_signatures_for_cycle_detection[-2:] + [current_action_signature])}")
+                # ✅ FIX: Add loop detection note to work history
+                loop_detection_note = (
+                    f"⚠️ LOOP DETECTED: Action pattern {' -> '.join(recent_action_signatures_for_cycle_detection[-2:] + [current_action_signature])} "
+                    f"indicates repetitive cycle. Completed {len(modified_files)} file(s) before detection: {list(modified_files)[:3]}. "
+                    f"Stopping feature execution to preserve progress."
+                )
+                self.context_manager.add_work_history(loop_detection_note)
+                
+                # ✅ FIX: Exit loop gracefully instead of raising error
+                self.logger.warning(
+                    f"Breaking out of step loop gracefully. "
+                    f"Returning partial progress: {len(modified_files)} modified file(s)."
+                )
+                break  # Exit the while loop, return what we've completed
 
             # Add the signature to history *before* handling rollback to ensure the
             # list is up-to-date for the next iteration's cycle check.
@@ -445,6 +452,27 @@ class AdaptiveAgent:
                 continue # Continue to the next loop iteration to re-evaluate from the restored state
 
             if action == "FINISH_FEATURE":
+                # --- NEW: Comprehensive Frontend Validation before Finishing ---
+                self.logger.info("Running comprehensive frontend validation before finishing feature...")
+                validator = FrontendValidator(self.project_state.project_structure_map)
+                report = validator.validate()
+                critical_issues = [issue for issue in report.issues if issue.severity in ["critical", "high"]]
+
+                if critical_issues:
+                    self.logger.warning(f"FINISH_FEATURE blocked. Found {len(critical_issues)} critical/high severity frontend issues.")
+                    # Format issues for the correction prompt
+                    issue_summary = "\n".join([f"- {issue.file_path}: {issue.message}" for issue in critical_issues[:5]])
+                    correction_instructions = (
+                        "CRITICAL: Your feature cannot be finished because frontend validation failed. "
+                        "The following issues were found:\n"
+                        f"{issue_summary}\n\n"
+                        "Review the file content and apply the necessary fixes (e.g., add missing attributes, correct structure)."
+                    )
+                    recent_action_signatures_for_cycle_detection.clear()
+                    continue # Re-prompt the agent with instructions to fix the issues
+
+            if action == "FINISH_FEATURE":
+                # Validation passed, feature is complete.
                 self.logger.info("CASE agent decided feature is complete.")
                 break
 
@@ -469,44 +497,21 @@ class AdaptiveAgent:
                 if modified_path:
                     modified_files.add(modified_path)
                     self.context_manager.set_last_modified_file(modified_path)
+
+                    # --- NEW: Immediate Frontend Validation on file change ---
+                    if any(modified_path.endswith(ext) for ext in ['.html', '.css', '.js']):
+                        self.logger.info(f"Frontend file '{modified_path}' modified. Running immediate validation...")
+                        validator = FrontendValidator(self.project_state.project_structure_map)
+                        report = validator.validate()
+                        file_issues = [issue for issue in report.issues if issue.file_path == modified_path]
+                        if file_issues:
+                            issue_summary = "\n".join([f"- {issue.message} (Severity: {issue.severity})" for issue in file_issues])
+                            self.context_manager.add_work_history(f"Validation issues found in {modified_path}:\n{issue_summary}")
+                            # If critical issues are found, inject a correction for the next step
+                            if any(issue.severity in ["critical", "high"] for issue in file_issues):
+                                correction_instructions = f"CRITICAL: You just introduced validation errors in {modified_path}. Review the work history and fix them in your next action."
             except Exception as e:
-                error_message = f"Error executing action '{action}': {e}"
-
-                failure_record = {
-                    'action': action,
-                    'parameters': parameters,
-                    'error': str(e),
-                    'timestamp': datetime.now().isoformat(),
-                    'context_type': self.context_manager.get_content_type_for_file(parameters.get('file_path'))
-                }
-                # --- NEW: Escalate from PATCH_FILE to WRITE_FILE on repeated failures ---
-                if action == "PATCH_FILE":
-                    filepath = parameters.get('file_path')
-                    if filepath:
-                        self.patch_failures[filepath] += 1
-                        if self.patch_failures[filepath] >= 3:
-                            self.logger.warning(
-                                f"PATCH_FILE has failed {self.patch_failures[filepath]} times for '{filepath}'. "
-                                "Escalating to WRITE_FILE strategy."
-                            )
-                            correction_instructions = (
-                                f"CRITICAL: You have failed to PATCH the file '{filepath}' multiple times. "
-                                "The patch is likely invalid or the context is wrong. "
-                                "DO NOT try to PATCH this file again. Instead, you MUST now use the "
-                                "WRITE_FILE action to overwrite the file with the complete, correct content. "
-                                "First, use GET_FULL_FILE_CONTENT to ensure you have the latest version, then "
-                                "construct the full file content with your intended changes and use WRITE_FILE."
-                            )
-                            self.patch_failures[filepath] = 0 # Reset counter after escalating
-                self.action_failures.append(failure_record)
-
-                # Check for repeated failures on the same action/file
-                if self._is_repeated_failure(failure_record):
-                    self.logger.warning(f"Repeated failure pattern detected for action '{action}' on file '{parameters.get('file_path')}'.")
-                    # Escalate by injecting a new instruction to ask for help
-                    correction_instructions = f"You have repeatedly failed to perform the action '{action}' on the file '{parameters.get('file_path')}'. The last error was: {e}. Re-evaluate your strategy. If you are stuck, use TARS_CHECKPOINT to ask for help."
-                    self.logger.info("Injecting repeated failure feedback as a correction instruction for the next step.")
-
+                error_message = f"Error during action '{action}': {e}"
                 # Circuit Breaker: Increment consecutive failure counter for the same action.
                 if current_action_signature == last_error_action_signature:
                     consecutive_error_count += 1
@@ -516,9 +521,37 @@ class AdaptiveAgent:
                     last_error_action_signature = current_action_signature
                     self.logger.info(f"New error detected for action '{current_action_signature}'. Resetting consecutive failure count to 1.")
 
-                if consecutive_error_count >= 3:
+                # --- FIX: The general circuit breaker should NOT trigger for PATCH_FILE failures,
+                # as they have their own specific escalation logic. ---
+                if consecutive_error_count >= 3 and action != "PATCH_FILE":
                     self.logger.critical(f"Circuit Breaker: Action '{current_action_signature}' has failed {consecutive_error_count} consecutive times. Escalating failure.")
                     raise RuntimeError(f"Action '{action}' failed {consecutive_error_count} times in a row. Aborting feature.")
+
+                # --- NEW: Centralized Failure Recording and Escalation Logic ---
+                failure_record = {
+                    'action': action,
+                    'parameters': parameters,
+                    'error': str(e),
+                    'timestamp': datetime.now().isoformat(),
+                    'context_type': self.context_manager.get_content_type_for_file(parameters.get('file_path'))
+                }
+                self.action_failures.append(failure_record)
+
+                if action == "PATCH_FILE":
+                    filepath = parameters.get('file_path')
+                    if filepath:
+                        self.patch_failures[filepath] += 1
+                        if self.patch_failures[filepath] >= 3:
+                            self.logger.warning(f"PATCH_FILE has failed {self.patch_failures[filepath]} times for '{filepath}'. Escalating to WRITE_FILE strategy.")
+                            correction_instructions = (
+                                f"CRITICAL: You have failed to PATCH the file '{filepath}' multiple times. "
+                                "The patch is likely invalid or the context is wrong. "
+                                "DO NOT try to PATCH this file again. Instead, you MUST now use the "
+                                "WRITE_FILE action to overwrite the file with the complete, correct content. "
+                                "First, use GET_FULL_FILE_CONTENT to ensure you have the latest version, then "
+                                "construct the full file content with your intended changes and use WRITE_FILE."
+                            )
+                            self.patch_failures[filepath] = 0 # Reset counter after escalating
 
                 self.logger.error(error_message, exc_info=True)
                 self.context_manager.add_work_history(f"System: {error_message}")
@@ -703,7 +736,7 @@ class AdaptiveAgent:
                 await self._update_defined_models_from_content(file_path, processed_content)
             elif "settings.py" in file_path: # type: ignore
                 await self._update_registered_apps_from_content(file_path, processed_content)
-            await self._update_project_structure_map(file_path)
+            await self._update_project_structure_map(file_path, processed_content) # This was the missing await
             modified_path = file_path
             return f"Successfully wrote to file {file_path}", modified_path
         elif action == "PATCH_FILE":
@@ -748,7 +781,8 @@ class AdaptiveAgent:
             if "settings.py" in file_path:
                 updated_content = self.file_system_manager.read_file(file_path)
                 await self._update_registered_apps_from_content(file_path, updated_content) # type: ignore
-            await self._update_project_structure_map(file_path)
+            updated_content = self.file_system_manager.read_file(file_path)
+            await self._update_project_structure_map(file_path, updated_content)
             modified_path = file_path
             return f"Successfully patched file {file_path}", modified_path
         elif action == "GET_FULL_FILE_CONTENT":
@@ -811,7 +845,13 @@ class AdaptiveAgent:
                     command_to_run,
                     f"Agent action: {command_to_run}"
                 )
-                result_data = json.loads(output_json)
+                try:
+                    result_data = json.loads(output_json, strict=False)
+                except json.JSONDecodeError:
+                    self.logger.warning("Command output JSON malformed, attempting repair...")
+                    repaired = repair_json(output_json)
+                    result_data = json.loads(repaired, strict=False)
+
                 # The result_data from the UI only contains command_str, stdout, stderr, exit_code.
                 # The CommandOutput model requires a 'command' field. # type: ignore
                 result_data['command'] = result_data.get('command_str', command_to_run)
@@ -845,9 +885,10 @@ class AdaptiveAgent:
                         if file_hash:
                             self.project_state.file_checksums[file_path_str] = file_hash
                             self.logger.debug(f"Updated checksum for new file: {file_path_str}")
-                    # --- END BUG FIX #11 ---
+                    # --- END BUG FIX #11 --- # type: ignore
+                    content = self.file_system_manager.read_file(file_path_str)
                     self.logger.info(f"New file found: {file_path_str}. Analyzing...")
-                    await self._update_project_structure_map(file_path_str)
+                    await self._update_project_structure_map(file_path_str, content)
                 
                 if newly_found_files:
                     modified_path = newly_found_files[-1] # Set last modified to the last new file found
@@ -858,29 +899,37 @@ class AdaptiveAgent:
 
     def _parse_json_response(self, response_text: str) -> dict | None:
         """Safely parses a JSON string from the LLM's response."""
+        json_str = response_text
         try:
             # First, look for a JSON object enclosed in markdown code fences.
             match = re.search(
                 r"```(?:json)?\s*(\{.*?\})\s*```", response_text, re.DOTALL
             )
             if match:
-                json_str = match.group(1)
+                json_str = match.group(1).strip()
                 self.logger.debug("Found JSON object inside markdown code fence.")
             else:
                 # If no fence is found, assume the whole response might be the JSON object.
                 self.logger.debug("No markdown fence found. Attempting to parse entire response as JSON.")
-                json_str = response_text
+                json_str = response_text.strip()
 
             # Sometimes the LLM returns a string like `"thought": "...", "action": "..."}`
             # This adds the missing opening brace if it's detected.
             if json_str.strip().startswith('"') and not json_str.strip().startswith('{'):
                 self.logger.warning("Malformed JSON detected (missing opening brace). Attempting to fix.")
                 json_str = "{" + json_str
-
-            return json.loads(json_str)
+            
+            # First, try standard parsing, which is faster.
+            return json.loads(json_str, strict=False)
         except json.JSONDecodeError as e:
-            self.logger.error(f"Could not decode JSON from response: {response_text}")
-            return None
+            self.logger.warning(f"Standard JSON parsing failed: {e}. Attempting to repair.")
+            try:
+                repaired_json_str = repair_json(response_text) # Use original response_text for repair
+                self.logger.info("✅ Successfully repaired malformed JSON.")
+                return json.loads(repaired_json_str)
+            except Exception as repair_error:
+                self.logger.error(f"Could not decode or repair JSON from response: {response_text}", exc_info=True)
+                return None
 
     def _perform_security_validation(self, code_content: str, file_path: str) -> tuple[bool, str | None]:
         """
@@ -919,7 +968,7 @@ class AdaptiveAgent:
 
 
 
-    async def _update_project_structure_map(self, file_path_str: str):
+    async def _update_project_structure_map(self, file_path_str: str, content: Optional[str] = None):
         """Updates the project_structure_map in ProjectState after a file is modified."""
         if not self.project_state or not self.code_intelligence_service:
             self.logger.warning("Cannot update structure map: ProjectState or CodeIntelligenceService not available.")
@@ -927,7 +976,7 @@ class AdaptiveAgent:
 
         try:
             content = self.file_system_manager.read_file(file_path_str)
-            if content is None:
+            if content is None: # type: ignore
                 self.logger.warning(f"Cannot update structure map: File content for '{file_path_str}' is empty or could not be read.")
                 return
 
@@ -949,16 +998,16 @@ class AdaptiveAgent:
 
                 if len(relative_path_parts) == 1:
                     # Project-root file (utils.py, manage.py, etc.)
-                    self.project_state.project_structure_map.global_files[file_name] = parsed_file_info
+                    self.project_state.project_structure_map.global_files[file_name] = parsed_file_info # type: ignore
                     self.logger.info(f"Updated structure map for global file '{file_name}'.")
                 else:
                     # App-level file (integrations/utils.py)
                     app_name = relative_path_parts[0]
                     # Ensure app and file entries exist in the project_structure_map
-                    if app_name not in self.project_state.project_structure_map.apps:
+                    if app_name not in self.project_state.project_structure_map.apps: # type: ignore
                         from .project_models import AppStructureInfo
-                        self.project_state.project_structure_map.apps[app_name] = AppStructureInfo()
-                    self.project_state.project_structure_map.apps[app_name].files[file_name] = parsed_file_info
+                        self.project_state.project_structure_map.apps[app_name] = AppStructureInfo() # type: ignore
+                    self.project_state.project_structure_map.apps[app_name].files[file_name] = parsed_file_info # type: ignore
                     self.logger.info(f"Updated project structure map for app '{app_name}', file '{file_name}'.")
                 
                 # Persist the newly parsed file information to disk.

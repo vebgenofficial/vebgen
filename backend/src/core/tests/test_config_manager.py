@@ -1,4 +1,4 @@
-# c/Users/USER/Documents/webagent/vebgen sharp updated/backend/src/core/tests/test_config_manager.py
+# backend/src/core/tests/test_config_manager.py
 import pytest
 import json
 from pathlib import Path

@@ -43,9 +43,9 @@ We provide security updates for the following versions:
 
 | Version | Supported          | End of Life  |
 | ------- | ------------------ | ------------ |
-| 1.0.x   | ✅ Full support    | TBD          |
+| 0.3.x   | ✅ Full support    | TBD          |
 | 0.2.x   | ✅ Security fixes  | Dec 31, 2025 |
-| &lt; 0.2   | ❌ No support      | Oct 1, 2025  |
+| < 0.2   | ❌ No support      | Oct 1, 2025  |
 
 **Note**: Always use the latest stable version for the best security posture.
 
@@ -169,6 +169,6 @@ For general questions about VebGen, use GitHub Discussions.
 
 ## 📜 Security Policy Updates
 
-This policy was last updated: **October 13, 2025**
+This policy was last updated: **October 26, 2025**
 
 We review this policy quarterly and update it as needed.

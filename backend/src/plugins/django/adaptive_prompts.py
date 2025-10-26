@@ -1,4 +1,4 @@
-# src/plugins/django/adaptive_prompts.py
+# backend/src/plugins/django/adaptive_prompts.py
 
 DJANGO_ADAPTIVE_AGENT_RULES = """
 **Django Development Recommendations for a High Success Rate:**
@@ -7,7 +7,9 @@ DJANGO_ADAPTIVE_AGENT_RULES = """
     Following a logical sequence significantly increases the success rate by ensuring dependencies are met before they are needed. The recommended order is:
     -   `startapp`: Create the application structure first.
     -   `settings.py` (App Registration): **Important Step.** It's highly recommended to `WRITE_FILE` to add the new app to `INSTALLED_APPS` immediately after `startapp`. Commands like `migrate` will fail without this.
-    -   `models.py`: Define your data models.
+    -   `models.py`: Define Django models (class MyModel(models.Model)) for 
+     database persistence. NOT standalone classes - must inherit from 
+     models.Model.
     -   `admin.py`: Register your models with the admin site so they are accessible.
     -   `makemigrations` & `migrate`: It's best to run these commands only *after* models are defined and the app is registered.
     -   `forms.py`: If needed, define forms for data input and validation.

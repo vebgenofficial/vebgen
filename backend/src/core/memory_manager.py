@@ -1,4 +1,4 @@
-# src/core/memory_manager.py
+# backend/src/core/memory_manager.py
 import json
 import logging
 import os

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "vebgen"
-version = "0.2.0"
+version = "0.3.0"
 authors = [
   { name="vebgenofficial", email="vebgenofficial@gmail.com" },
 ]
@@ -29,6 +29,7 @@ dependencies = [
     "keyring",
     "lxml",
     "markdown-it-py",
+    "html5lib",
     "openai",
     "Pillow",
     "pygments",
@@ -37,6 +38,8 @@ dependencies = [
     "unidiff==0.7.5",
     "rapidfuzz==3.6.2",
     "requests",
+    "json_repair",
+    "tinycss2", 
 ]
 
 [project.urls]

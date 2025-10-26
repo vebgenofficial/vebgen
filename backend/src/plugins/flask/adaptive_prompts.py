@@ -1,4 +1,4 @@
-# src/plugins/flask/adaptive_prompts.py
+# backend/src/plugins/flask/adaptive_prompts.py
 
 FLASK_ADAPTIVE_AGENT_RULES = """
 **Flask Development Recommendations for a High Success Rate:**

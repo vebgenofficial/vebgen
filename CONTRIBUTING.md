@@ -6,15 +6,15 @@ Thank you for your interest in contributing to VebGen! This project thrives beca
 
 ## 📋 Table of Contents
 
-- How Can I Contribute?
-- Reporting Bugs
-- Suggesting Enhancements
-- Contributing Code
-- Development Environment Setup
-- Running Tests
-- Code Style Guidelines
-- Documentation Contributions
-- Code of Conduct
+- [How Can I Contribute?](#-how-can-i-contribute)
+- [Reporting Bugs](#-reporting-bugs)
+- [Suggesting Enhancements](#-suggesting-enhancements)
+- [Contributing Code](#-contributing-code)
+- [Development Environment Setup](#-development-environment-setup)
+- [Running Tests](#-running-tests)
+- [Code Style Guidelines](#-code-style-guidelines)
+- [Documentation Contributions](#-documentation-contributions)
+- [Code of Conduct](#-code-of-conduct)
 
 ---
 
@@ -76,7 +76,7 @@ Title: CASE agent fails to parse Django models with nested Meta class
 
 Environment:
 ```text
-VebGen: 0.2.5
+VebGen: 0.3.0
 OS: Windows 11 Pro
 Python: 3.10.8
 LLM: GPT-4o via OpenAI
@@ -443,4 +443,4 @@ Questions? Join our GitHub Discussions
 
 Happy coding! 🚀
 
-Last updated: October 13, 2025
+Last updated: October 26, 2025

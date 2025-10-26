@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% load static %}
+
+{% block content %}
+<article>
+    <h1>{{ post.title }}</h1>
+    <p>{{ post.content|linebreaks }}</p>
+</article>
+
+<section id="comments">
+    <h2>Comments</h2>
+    <form id="comment-form" action="{% url 'add_comment' post.id %}" method="post">
+        {% csrf_token %}
+        <label for="comment-text">Your Comment:</label>
+        <textarea id="comment-text" name="text" rows="4" required></textarea>
+        <button type="submit">Post Comment</button>
+    </form>
+    <!-- Comments will be loaded here -->
+</section>
+<script src="{% static 'blog/comments.js' %}"></script>
+{% endblock %}

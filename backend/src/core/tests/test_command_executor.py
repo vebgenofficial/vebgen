@@ -1,4 +1,4 @@
-# c:\Users\USER\Documents\webagent\vebgen sharp updated\backend\src\core\tests\test_command_executor.py
+# backend\src\core\tests\test_command_executor.py
 import pytest
 import os
 import platform

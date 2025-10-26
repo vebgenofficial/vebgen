@@ -2,17 +2,21 @@
 import pytest
 import asyncio
 import json
+from pathlib import Path
 from unittest.mock import MagicMock, AsyncMock, patch, ANY
 
 from src.core.workflow_manager import WorkflowManager
 from src.core.agent_manager import AgentManager
 from src.core.memory_manager import MemoryManager
 from src.core.config_manager import ConfigManager
-from src.core.adaptive_agent import AdaptiveAgent
+from src.core.adaptive_agent import AdaptiveAgent, TarsPlanner
 from src.core.file_system_manager import FileSystemManager
 from src.core.command_executor import CommandExecutor
 from src.core.code_intelligence_service import CodeIntelligenceService
-from src.core.project_models import ProjectState, CommandOutput, ProjectFeature, FeatureStatusEnum
+from src.core.project_models import (
+    ProjectState, CommandOutput, ProjectFeature, FeatureStatusEnum, FileStructureInfo,
+    DjangoSettingsDetails, DjangoModelFileDetails, DjangoModel, AppStructureInfo, ProjectStructureMap
+)
 
 # --- Pytest Fixtures for Mocking Dependencies ---
 
@@ -82,6 +86,7 @@ def workflow_manager(
     # --- FIX: Initialize a default project state for the manager ---
     # This ensures that tests calling methods like `run_adaptive_workflow`
     # have a valid state to operate on, preventing NoneType errors.
+    manager.code_intelligence_service = mock_code_intelligence_service
     manager.project_state = ProjectState(project_name="test_project", framework="django", root_path=str(mock_file_system_manager.project_root)) # type: ignore
     return manager
 
@@ -101,9 +106,9 @@ async def test_initial_setup_populates_state_fields(workflow_manager: WorkflowMa
     # Mock the UI command callback to simulate git command outputs
     async def mock_request_command_execution(task_id: str, command: str, description: str):
         if "git branch --show-current" in command:
-            return (True, '{"stdout": "main"}')
+            return (True, '''{"stdout": "main"}''')
         if "git status --short" in command:
-            return (True, '{"stdout": "M  README.md"}')
+            return (True, '''{"stdout": "M  README.md"}''')
         return (True, '{}') # Default success for other commands like venv, pip, git init
     workflow_manager.request_command_execution_cb = AsyncMock(side_effect=mock_request_command_execution)
 
@@ -167,7 +172,51 @@ class TestWorkflowManagerLifecycle:
         # The name should be derived from the file_system_manager's project_root,
         # which is a temporary path created by pytest's tmp_path fixture.
         expected_name = workflow_manager.file_system_manager.project_root.name
-        assert workflow_manager.project_state.project_name == expected_name
+        assert workflow_manager.project_state.project_name == expected_name # type: ignore
+
+    def test_load_existing_project_scenario3_triggers_initial_scan(self, workflow_manager: WorkflowManager, mock_memory_manager: MagicMock, mock_file_system_manager: FileSystemManager, mock_code_intelligence_service: MagicMock):
+        """
+        Tests that loading an existing project with code but no VebGen state
+        (Scenario 3) correctly triggers the initial project scan.
+        """
+        # --- FIX: Ensure the manager starts with no state for this test ---
+        # This forces load_existing_project to use our mocked load_project_state.
+        workflow_manager.project_state = None
+
+        # --- Arrange ---
+        # 1. Simulate an existing project with code
+        mock_file_system_manager.write_file("manage.py", "import os\nimport sys\n\nif __name__ == '__main__':\n    pass")
+        mock_file_system_manager.write_file("app/views.py", "from django.http import HttpResponse\n\ndef index(request):\n    return HttpResponse('Hello')")
+
+        # 2. Simulate an empty/corrupted state file and no valid backups
+        empty_state = ProjectState(project_name="test", framework="django", root_path=str(mock_file_system_manager.project_root))
+        mock_memory_manager.load_project_state.return_value = empty_state
+        mock_memory_manager.restore_from_latest_backup.return_value = None
+
+        workflow_manager._project_has_code = MagicMock(return_value=True)
+
+        # --- Act ---
+        # Use patch to mock the rglob method on the real Path object
+        with patch('pathlib.Path.rglob') as mock_rglob:
+            mock_rglob.return_value = [
+                mock_file_system_manager.project_root / "manage.py",
+                mock_file_system_manager.project_root / "app" / "views.py",
+            ]
+            workflow_manager.load_existing_project()
+
+        # --- Assert ---
+        # Verify the core logic: load, attempt restore, then perform scan
+        mock_memory_manager.load_project_state.assert_called_once()
+        mock_memory_manager.restore_from_latest_backup.assert_called_once()
+
+        # Verify the core of the feature: the scan was performed
+        # The scan should parse both manage.py and app/views.py
+        assert mock_code_intelligence_service.parse_file.call_count >= 2
+        mock_code_intelligence_service.parse_file.assert_any_call("manage.py", ANY)
+        mock_code_intelligence_service.parse_file.assert_any_call(str(Path("app/views.py")), ANY)
+
+        # Verify that the state was saved after the scan
+        mock_memory_manager.save_project_state.assert_called_once_with(workflow_manager.project_state)
 
     def test_can_continue_with_active_feature(self, workflow_manager: WorkflowManager):
         """Tests that can_continue correctly identifies a continuable feature."""
@@ -201,6 +250,80 @@ class TestWorkflowManagerLifecycle:
 
         assert workflow_manager.can_continue() is None
 
+@pytest.mark.asyncio
+async def test_initial_scan_populates_state_from_code_intelligence(workflow_manager: WorkflowManager, mock_file_system_manager: FileSystemManager, mock_code_intelligence_service: MagicMock):
+    """
+    Tests that the initial project scan correctly uses the CodeIntelligenceService
+    to populate the project state (apps, models, structure map).
+    """
+    print("\n--- Testing WorkflowManager: Initial Scan State Population ---")
+
+    # --- Mock Setup ---
+    # 1. Simulate an existing Django project with settings.py and models.py
+    settings_content = """
+INSTALLED_APPS = [
+    'django.contrib.admin',
+    'blog.apps.BlogConfig',
+    'users',
+]
+"""
+    models_content = "from django.db import models\nclass Post(models.Model): pass"
+    mock_file_system_manager.write_file("myproject/settings.py", settings_content)
+    mock_file_system_manager.write_file("blog/models.py", models_content)
+
+    # 2. Mock the return values from CodeIntelligenceService.parse_file
+    mock_settings_info = FileStructureInfo(
+        file_type="django_settings",
+        django_settings_details=DjangoSettingsDetails(
+            key_settings={"INSTALLED_APPS": ["django.contrib.admin", "blog.apps.BlogConfig", "users"]}
+        )
+    )
+    mock_models_info = FileStructureInfo(
+        file_type="django_model",
+        django_model_details=DjangoModelFileDetails(
+            models=[DjangoModel(name="Post", bases=["models.Model"])]
+        )
+    )
+    
+    def parse_file_side_effect(path, content):
+        if "settings.py" in path:
+            return mock_settings_info
+        if "models.py" in path:
+            return mock_models_info
+        return None
+
+    mock_code_intelligence_service.parse_file.side_effect = parse_file_side_effect
+
+    # --- FIX ---
+    # The mock_code_intelligence_service fixture mocks the entire service.
+    # We need to attach the *real* implementation of _update_project_structure_map_with_file_info
+    # to the mock so that it actually updates the project state during the test.
+    # We bind the method to the mock instance.
+    real_update_method = CodeIntelligenceService._update_project_structure_map_with_file_info
+    mock_code_intelligence_service._update_project_structure_map_with_file_info.side_effect = lambda state, path, info: real_update_method(mock_code_intelligence_service, state, path, info)
+
+
+    # 3. Mock the file system scan to return the paths we created.
+    # We use patch.object because mock_file_system_manager.project_root is a real Path object, not a mock.
+    with patch.object(type(mock_file_system_manager.project_root), 'rglob') as mock_rglob:
+        mock_rglob.return_value = [
+            mock_file_system_manager.project_root / "myproject/settings.py",
+            mock_file_system_manager.project_root / "blog/models.py",
+        ]
+
+        # --- Execute ---
+        workflow_manager._perform_initial_project_scan()
+
+    # --- Assertions ---
+    state = workflow_manager.project_state
+    # Assert registered apps were detected from settings
+    assert state.registered_apps == {'blog', 'users'}
+    # Assert defined models were detected from models.py
+    assert state.defined_models == {"blog": ["Post"]}
+    # Assert project structure map was populated
+    assert "blog" in state.project_structure_map.apps
+    assert "models.py" in state.project_structure_map.apps["blog"].files
+    print("✅ Initial scan correctly populated project state via CodeIntelligenceService.")
 
 @patch("src.core.workflow_manager.AdaptiveAgent")
 class TestAdaptiveWorkflowExecution:

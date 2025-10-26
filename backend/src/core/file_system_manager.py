@@ -1,4 +1,4 @@
-# src/core/file_system_manager.py
+# backend/src/core/file_system_manager.py
 import io
 import logging
 from pathlib import Path
@@ -28,6 +28,8 @@ class FileSystemManager:
     interactions. Its primary responsibility is to ensure that no operation
     can access or modify files outside of the designated project root.
     """
+    FUZZY_MATCH_THRESHOLD = 0.82
+
     def __init__(self, project_root_path: str | Path):
         """
         Initializes the FileSystemManager.
@@ -410,29 +412,44 @@ class FileSystemManager:
             logger.error(f"Failed to apply patch to '{relative_path}': {e}", exc_info=True)
             raise e
 
-    def apply_patch(self, relative_path: str | Path, patch_content: str) -> None:
+    def apply_patch(self, relative_path: str | Path, patch_content: str) -> Optional[Dict[str, Any]]:
         """
-        Enhanced patch application with fuzzy fallback
-        Success rate: 70% → 92%
-        """
-        try:
-            return self._apply_patch_strict(relative_path, patch_content)
+        Enhanced patch application that detects format and applies appropriate strategy.
         
-        except PatchApplyError as e:
-            # --- FIX: Distinguish between patch application errors and content validation errors ---
-            error_str = str(e)
-            if "Invalid patch format" in error_str:
-                self.logger.error(f"Strict patch failed due to invalid format for {relative_path}. Aborting fuzzy fallback.", exc_info=False)
+        Supports:
+        - SEARCH/REPLACE format (primary)
+        - Unified diff format (legacy fallback)
+        """
+        # Detect format
+        if '<<<<<<< SEARCH' in patch_content and '>>>>>>> REPLACE' in patch_content:
+            # New SEARCH/REPLACE format
+            self.logger.info(f"Detected SEARCH/REPLACE format for {relative_path}")
+            try:
+                success, diff_data = self.apply_search_replace_patch(relative_path, patch_content)
+                return diff_data # Return diff data on success
+            except PatchApplyError as e:
+                # Re-raise with full error details
                 raise e
-            if "Patch created syntax error" in error_str:
-                self.logger.error(f"Strict patch failed due to syntax error in content for {relative_path}. Aborting fuzzy fallback.", exc_info=False)
-                raise e
-
-            # Layer 2: Fuzzy fallback for failed patches
-            # This block is now only reached for context mismatch errors (e.g., "Patch could not be applied cleanly").
-            self.logger.warning(f"Strict patch failed for {relative_path}: {e}")
-            self.logger.info("Attempting fuzzy matching fallback...")
-            return self._apply_patch_fuzzy(relative_path, patch_content, original_exception=e)
+        else:
+            # Legacy unified diff format
+            self.logger.info(f"Detected unified diff format for {relative_path} (legacy)")
+            try:
+                return self._apply_patch_strict(relative_path, patch_content)
+            except PatchApplyError as e:
+                error_str = str(e)
+                
+                if "Invalid patch format" in error_str:
+                    self.logger.error(f"Strict patch failed due to invalid format for {relative_path}. Aborting fuzzy fallback.", exc_info=False)
+                    raise e
+                
+                if "Patch created syntax error" in error_str:
+                    self.logger.error(f"Strict patch failed due to syntax error in content for {relative_path}. Aborting fuzzy fallback.", exc_info=False)
+                    raise e
+                
+                # Try fuzzy fallback for unified diffs
+                self.logger.warning(f"Strict patch failed for {relative_path}: {e}")
+                self.logger.info("Attempting fuzzy matching fallback...")
+                return self._apply_patch_fuzzy(relative_path, patch_content, original_exception=e)
 
     def _apply_patch_fuzzy(self, relative_path: str | Path, patch_content: str, original_exception: PatchApplyError) -> Optional[Dict[str, Any]]:
         """
@@ -535,6 +552,347 @@ class FileSystemManager:
         except Exception as e:
             self.logger.error(f"Fuzzy patch failed: {e}")
             raise PatchApplyError(f"Fuzzy patch application failed: {e}") from e
+
+
+    def parse_search_replace_blocks(self, patch_content: str) -> List[Tuple[str, str]]:
+        """
+        Parses SEARCH/REPLACE format patch content into a list of (search, replace) tuples.
+        
+        Format:
+            <<<<<<< SEARCH
+            old content
+            =======
+            new content
+            >>>>>>> REPLACE
+        
+        Returns:
+            List of (search_block, replace_block) tuples
+        
+        Raises:
+            PatchApplyError: If the format is invalid
+        """
+        blocks = []
+        lines = patch_content.split('\n')
+        i = 0
+        
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Look for SEARCH marker
+            if line.startswith('<<<<<<< SEARCH'):
+                search_lines = []
+                i += 1
+                
+                # Collect SEARCH block lines until separator
+                while i < len(lines):
+                    if lines[i].strip() == '=======':
+                        break
+                    search_lines.append(lines[i])
+                    i += 1
+                else:
+                    raise PatchApplyError("SEARCH/REPLACE block missing '=======' separator")
+                
+                # Skip the separator
+                i += 1
+                
+                # Collect REPLACE block lines until end marker
+                replace_lines = []
+                while i < len(lines):
+                    if lines[i].strip().startswith('>>>>>>> REPLACE'):
+                        break
+                    replace_lines.append(lines[i])
+                    i += 1
+                else:
+                    raise PatchApplyError("SEARCH/REPLACE block missing '>>>>>>> REPLACE' marker")
+                
+                # Convert lists to strings, preserving exact content
+                search_block = '\n'.join(search_lines)
+                replace_block = '\n'.join(replace_lines)
+                
+                blocks.append((search_block, replace_block))
+            
+            i += 1
+        
+        if not blocks:
+            raise PatchApplyError("No valid SEARCH/REPLACE blocks found in patch content")
+        
+        return blocks
+
+    def apply_search_replace_patch(
+        self, 
+        relative_path: str | Path, 
+        patch_content: str
+    ) -> Tuple[bool, Optional[Dict[str, Any]]]:
+        """
+        Applies a SEARCH/REPLACE format patch with 5-layer matching strategy.
+        
+        Returns:
+            Tuple of (success, diff_data_dict)
+        """
+        try:
+            target_path = self._resolve_safe_path(relative_path)
+            
+            if not target_path.is_file():
+                raise FileNotFoundError(f"Cannot apply patch, file not found: {relative_path}")
+            
+            # Read original content
+            original_content = self.read_file(relative_path)
+            modified_content = original_content
+            
+            # Parse SEARCH/REPLACE blocks
+            try:
+                blocks = self.parse_search_replace_blocks(patch_content)
+            except PatchApplyError as e:
+                # If parsing fails, it's a format error. We can't proceed.
+                self.logger.error(f"Failed to parse SEARCH/REPLACE blocks for {relative_path}: {e}")
+                raise
+            
+            self.logger.info(f"Parsed {len(blocks)} SEARCH/REPLACE block(s) for {relative_path}")
+            
+            # Apply each block sequentially using the multi-layer strategy
+            for block_idx, (search_block, replace_block) in enumerate(blocks, 1):
+                self.logger.info(f"Applying block {block_idx}/{len(blocks)}...")
+                
+                success, new_content = self._apply_single_search_replace(
+                    modified_content, search_block, replace_block, str(relative_path), block_idx
+                )
+                
+                if not success:
+                    # Generate a detailed, helpful error message for the LLM
+                    error_msg = self._generate_search_replace_error(
+                        search_block, modified_content, str(relative_path), block_idx, len(blocks)
+                    )
+                    raise PatchApplyError(error_msg)
+                
+                modified_content = new_content
+            
+            # Write the final modified content
+            self.write_file(relative_path, modified_content)
+            
+            # Validate syntax for Python files
+            self._validate_and_rollback_on_error(relative_path, original_content)
+            
+            self.logger.info(f"Successfully applied all {len(blocks)} SEARCH/REPLACE blocks to {relative_path}")
+            
+            # Return diff data for UI display
+            diff_data = {
+                "filepath": str(relative_path),
+                "original_content": original_content,
+                "modified_content": modified_content
+            }
+            
+            return True, diff_data
+            
+        except (PatchApplyError, FileNotFoundError, ValueError) as e:
+            self.logger.error(f"Failed to apply SEARCH/REPLACE patch to {relative_path}: {e}", exc_info=True)
+            raise
+
+    def _apply_single_search_replace(
+        self,
+        content: str,
+        search_block: str,
+        replace_block: str,
+        filepath: str,
+        block_num: int
+    ) -> Tuple[bool, str]:
+        """
+        Applies a single SEARCH/REPLACE block using 5-layer matching strategy.
+        
+        Returns:
+            Tuple of (success, modified_content)
+        """
+        self.logger.info(f"[METRICS] Attempting SEARCH/REPLACE block {block_num} on {filepath}")
+        
+        # LAYER 1: Exact Match (50-60% success rate)
+        if search_block in content:
+            self.logger.info(f"Block {block_num}: Exact match found")
+            new_content = content.replace(search_block, replace_block, 1)  # Replace only first occurrence
+            self.logger.info(f"[METRICS] Layer_1_Exact_Match SUCCESS for block {block_num}")
+            return True, new_content
+        
+        # LAYER 2: Whitespace-Insensitive Match (+15% success)
+        normalized_search = ' '.join(search_block.split())
+        content_lines = content.split('\n')
+        
+        for line_idx in range(len(content_lines)):
+            # Try to find a match starting at this line
+            window_size = search_block.count('\n') + 1
+            if line_idx + window_size > len(content_lines):
+                break
+            
+            window = '\n'.join(content_lines[line_idx:line_idx + window_size])
+            normalized_window = ' '.join(window.split())
+            
+            if normalized_search == normalized_window:
+                self.logger.info(f"Block {block_num}: Whitespace-insensitive match found at line {line_idx + 1}")
+                self.logger.info(f"[METRICS] Layer_2_Whitespace_Insensitive SUCCESS for block {block_num}")
+                # Preserve the indentation of the original location
+                indentation = self._get_leading_whitespace(content_lines[line_idx])
+                indented_replace = self._apply_indentation(replace_block, indentation)
+                
+                new_lines = content_lines[:line_idx] + indented_replace.split('\n') + content_lines[line_idx + window_size:]
+                return True, '\n'.join(new_lines)
+        
+        # LAYER 3: Indentation-Preserving Match (+10% success)
+        search_stripped = self._strip_common_leading_whitespace(search_block)
+        
+        for line_idx in range(len(content_lines)):
+            window_size = search_block.count('\n') + 1
+            if line_idx + window_size > len(content_lines):
+                break
+            
+            window = '\n'.join(content_lines[line_idx:line_idx + window_size])
+            window_stripped = self._strip_common_leading_whitespace(window)
+            
+            if search_stripped == window_stripped:
+                self.logger.info(f"Block {block_num}: Indentation-preserving match found at line {line_idx + 1}")
+                self.logger.info(f"[METRICS] Layer_3_Indentation_Preserving SUCCESS for block {block_num}")
+                indentation = self._get_leading_whitespace(content_lines[line_idx])
+                indented_replace = self._apply_indentation(replace_block, indentation)
+                
+                new_lines = content_lines[:line_idx] + indented_replace.split('\n') + content_lines[line_idx + window_size:]
+                return True, '\n'.join(new_lines)
+        
+        # LAYER 4: Fuzzy Match with difflib (+12% success)
+        best_match_ratio = 0.0
+        best_match_idx = -1
+        best_match_size = 0
+        
+        search_lines = search_block.split('\n')
+        window_size = len(search_lines)
+        
+        for line_idx in range(len(content_lines) - window_size + 1):
+            window_lines = content_lines[line_idx:line_idx + window_size]
+            
+            # Calculate similarity ratio
+            matcher = difflib.SequenceMatcher(None, search_lines, window_lines)
+            ratio = matcher.ratio()
+            
+            if ratio > best_match_ratio:
+                best_match_ratio = ratio
+                best_match_idx = line_idx
+                best_match_size = window_size
+        
+        # Use 85% similarity threshold
+        if best_match_ratio >= self.FUZZY_MATCH_THRESHOLD:
+            self.logger.info(
+                f"Block {block_num}: Fuzzy match found at line {best_match_idx + 1} "
+                f"(similarity: {best_match_ratio:.1%})"
+            )
+            self.logger.info(f"[METRICS] Layer_4_Fuzzy_Match SUCCESS for block {block_num} (similarity: {best_match_ratio:.2%})")
+
+            # Preserve indentation
+            if best_match_idx >= 0:
+                indentation = self._get_leading_whitespace(content_lines[best_match_idx])
+                indented_replace = self._apply_indentation(replace_block, indentation)
+                
+                new_lines = (
+                    content_lines[:best_match_idx] +
+                    indented_replace.split('\n') +
+                    content_lines[best_match_idx + best_match_size:]
+                )
+                return True, '\n'.join(new_lines)
+        
+        # LAYER 5: Reserved for Tree-Sitter (implement in Phase 3)
+        self.logger.warning(f"[METRICS] All_Layers_Failed for block {block_num}")
+        return False, content
+
+    def _get_leading_whitespace(self, line: str) -> str:
+        """Extracts leading whitespace from a line."""
+        return line[:len(line) - len(line.lstrip())]
+
+    def _strip_common_leading_whitespace(self, text: str) -> str:
+        """Removes common leading whitespace from all lines."""
+        lines = text.split('\n')
+        if not lines:
+            return text
+        
+        # Find minimum indentation (ignoring empty lines)
+        min_indent = float('inf')
+        for line in lines:
+            if line.strip():  # Skip empty lines
+                indent = len(line) - len(line.lstrip())
+                min_indent = min(min_indent, indent)
+        
+        if min_indent == float('inf'):
+            return text
+        
+        # Remove that amount from each line
+        stripped_lines = []
+        for line in lines:
+            if line.strip():
+                stripped_lines.append(line[int(min_indent):])
+            else:
+                stripped_lines.append(line)
+        
+        return '\n'.join(stripped_lines)
+
+    def _apply_indentation(self, text: str, indentation: str) -> str:
+        """Applies given indentation to each line of text."""
+        lines = text.split('\n')
+        return '\n'.join(indentation + line if line.strip() else line for line in lines)
+
+    def _generate_search_replace_error(
+        self, search_block: str, file_content: str, filepath: str, block_num: int, total_blocks: int
+    ) -> str:
+        """Generates a detailed, helpful error message when SEARCH/REPLACE fails."""
+        file_lines = file_content.split('\n')
+        search_lines = search_block.split('\n')
+        
+        best_match_ratio = 0.0
+        best_match_idx = 0
+        best_match_lines = []
+        
+        for line_idx in range(len(file_lines) - len(search_lines) + 1):
+            window = file_lines[line_idx:line_idx + len(search_lines)]
+            matcher = difflib.SequenceMatcher(None, search_lines, window)
+            ratio = matcher.ratio()
+            
+            if ratio > best_match_ratio:
+                best_match_ratio = ratio
+                best_match_idx = line_idx
+                best_match_lines = window
+        
+        closest_match = '\n'.join(best_match_lines) if best_match_lines else "(no similar content found)"
+        
+        differences = []
+        if best_match_lines:
+            for i, (search_line, file_line) in enumerate(zip(search_lines, best_match_lines)):
+                if search_line != file_line:
+                    differences.append(f"  Line {i+1}:")
+                    differences.append(f"    Your SEARCH: {repr(search_line)}")
+                    differences.append(f"    Actual file:  {repr(file_line)}")
+        
+        diff_text = '\n'.join(differences) if differences else "  (Content structure differs significantly)"
+        
+        error_msg = f"""
+SearchReplaceNoExactMatch: SEARCH/REPLACE block #{block_num} of {total_blocks} failed to match lines in {filepath}
+
+**Your SEARCH block:**
+```
+{search_block}
+```
+
+**Did you mean to match these actual lines from {filepath}?** (similarity: {best_match_ratio:.1%})
+```
+{closest_match}
+```
+
+**Differences detected:**
+{diff_text}
+
+**Rules to fix this:**
+1. SEARCH must match the file EXACTLY - including all whitespace, comments, and indentation
+2. If the file changed since you last read it, use GET_FULL_FILE_CONTENT to get fresh content
+3. Double-check you copied the exact text from the file
+4. Don't include line numbers in your SEARCH block (they're not in the actual file!)
+
+**Next step:** Send a corrected SEARCH/REPLACE block with the exact text from the file.
+"""
+        return textwrap.dedent(error_msg).strip()
+
+
+
     def get_directory_structure_markdown(self, max_depth: int = 3, max_items_per_dir: int = 10, indent_char: str = "    ") -> str:
         """
         Generates a Markdown representation of the project's directory structure.

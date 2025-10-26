@@ -1,4 +1,4 @@
-# c:\Users\navee\Music\VebGen\vebgen sharp\backend\src\core\test_memory_manager.py
+# backend\src\core\test_memory_manager.py
 import json
 import pytest
 import time

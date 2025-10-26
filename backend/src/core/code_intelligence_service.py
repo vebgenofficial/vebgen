@@ -1,4 +1,4 @@
-# src/core/code_intelligence_service.py
+# backend/src/core/code_intelligence_service.py
 from __future__ import annotations
 import logging
 from pathlib import Path
@@ -14,8 +14,11 @@ from functools import lru_cache
 import html # For unescaping HTML entities
 from .patch_generator import PatchGenerator
 # import ast
+from .parsers.vanilla_js_parser import VanillaJSParser
+from .parsers.css_parser import CSSParser
+from .parsers.html_parser import HTMLParser # NEW: Import the HTML parser
 from .project_models import (
-    ProjectState, FileStructureInfo, PythonFileImport, PythonFunctionParam, PythonFunction,
+    ProjectState, FileStructureInfo, PythonFileImport, PythonFunctionParam, PythonFunction, AppStructureInfo, ProjectStructureMap,
     PythonClassAttribute, PythonClass, PythonFileDetails, DjangoModelField, DjangoModel,
     DjangoModelFileDetails, DjangoView, DjangoViewFileDetails, DjangoTestFileDetails, WagtailPage, DjangoCMSPlugin,
     DjangoTestClass, # New Test Class model
@@ -24,12 +27,11 @@ from .project_models import (
     DRFRouterRegistration, DRFViewSetDetails, # New models for DRF
     DjangoSignalReceiver, DjangoSignalFileDetails, CeleryTask, CeleryTaskFileDetails, # New Signal/Celery models
     DjangoChannelsConsumer, DjangoChannelsRouting, DjangoChannelsFileDetails, # New Channels models
-    GlobalURLRegistryEntry, # New models for DRF,
     GraphQLSchemaDetails, GraphQLType, GraphQLField, # New GraphQL models
     APIContractEndpoint, # Added for API Contract parsing if needed in future
     DjangoURLInclude, DjangoTemplateTag, DjangoTemplateTagFileDetails, # New TemplateTag models
-    DjangoURLConfDetails, DjangoForm, DjangoFormFileDetails, DjangoAdminRegisteredModel, DjangoAdminClass,
-    DjangoAdminFileDetails, DjangoSettingsDetails, TemplateFileDetails, JSFileDetails, CSSFileDetails
+    DjangoURLConfDetails, DjangoForm, DjangoFormFileDetails, DjangoAdminRegisteredModel, DjangoAdminClass, HTMLFileDetails, VanillaJSFileDetails,
+    DjangoAdminFileDetails, DjangoSettingsDetails, CSSFileDetails
 ) 
 from .project_models import CeleryBeatSchedule
 # --- NEW: Import performance monitoring decorator ---
@@ -141,6 +143,33 @@ class CodeIntelligenceService:
         except Exception as e:
             logger.warning(f"Could not parse .env file '{file_path_str}': {e}")
         return env_vars
+
+    def _update_project_structure_map_with_file_info(self, project_state: ProjectState, file_path_str: str, file_info: FileStructureInfo):
+        """
+        Updates the project_structure_map in a given ProjectState with new file info.
+        This is a helper to centralize the logic for updating the code map.
+        """
+        if not project_state or not file_info:
+            return
+
+        relative_path = Path(file_path_str)
+        file_name = relative_path.name
+
+        # Ensure the map exists, checking project_state first
+        if not project_state.project_structure_map: # type: ignore
+            project_state.project_structure_map = ProjectStructureMap() # type: ignore
+
+        if len(relative_path.parts) == 1:
+            # Project-root file (e.g., manage.py)
+            project_state.project_structure_map.global_files[file_name] = file_info # type: ignore
+            logger.debug(f"Updated structure map for global file '{file_name}'.")
+        else:
+            # App-level file (e.g., my_app/views.py)
+            app_name = relative_path.parts[0]
+            if app_name not in project_state.project_structure_map.apps: # type: ignore
+                project_state.project_structure_map.apps[app_name] = AppStructureInfo() # type: ignore
+            project_state.project_structure_map.apps[app_name].files[file_name] = file_info # type: ignore
+            logger.debug(f"Updated project structure map for app '{app_name}', file '{file_name}'.")
 
     def _extract_function_details(self, node: ast.FunctionDef) -> PythonFunction:
         """
@@ -282,6 +311,23 @@ class CodeIntelligenceService:
         # Filter out any empty strings that might have been added
         return [alias for alias in aliases if alias]
         
+    def _extract_list_from_ast_node(self, node: ast.AST) -> List[str]:
+        """
+        Safely extracts a list of strings from an AST list/tuple node,
+        even if the elements are complex expressions like `BASE_DIR / 'static'`.
+        """
+        items = []
+        if isinstance(node, (ast.List, ast.Tuple)):
+            for elt in node.elts:
+                try:
+                    # For simple constants, evaluate them
+                    items.append(ast.literal_eval(elt))
+                except (ValueError, SyntaxError, TypeError):
+                    # For complex expressions (like Path division), unparse them
+                    items.append(ast.unparse(elt))
+        return items
+
+
     def _determine_import_type(self, module_name: str, project_apps: Optional[List[str]] = None, level: int = 0) -> Literal["stdlib", "third_party", "local_app", "project_app", "unknown"]:
         """
         Classifies a Python import using heuristics (stdlib, third-party, local).
@@ -1441,7 +1487,7 @@ class CodeIntelligenceService:
                     key_settings_to_find = {
                         "INSTALLED_APPS", "MIDDLEWARE", "DATABASES", "AUTH_USER_MODEL",
                         "ROOT_URLCONF", "STATIC_URL", "STATIC_ROOT", "STATICFILES_DIRS",
-                        "MEDIA_URL", "MEDIA_ROOT", "SECRET_KEY", "DEBUG", "ALLOWED_HOSTS",
+                        "MEDIA_URL", "MEDIA_ROOT", "SECRET_KEY", "DEBUG", "ALLOWED_HOSTS", "TEMPLATES",
                         "AUTHENTICATION_BACKENDS", "LOGGING", "CACHES", "SESSION_ENGINE",
                         "SESSION_COOKIE_AGE", "LANGUAGE_CODE", "USE_I18N", "USE_L10N", "STATICFILES_STORAGE",
                         "USE_TZ", "LOCALE_PATHS", "STATICFILES_STORAGE", "TEMPLATES"
@@ -1497,13 +1543,18 @@ class CodeIntelligenceService:
                                 if isinstance(target, ast.Name):
                                     setting_name = target.id
                                     if setting_name in key_settings_to_find and setting_name not in key_settings:
-                                        unparsed_value = ast.unparse(node_item.value) # type: ignore
-                                        try:
-                                            # Try to evaluate, but have the unparsed value ready.
-                                            key_settings[setting_name] = ast.literal_eval(node_item.value)
-                                        except (ValueError, SyntaxError): # For complex values like BASE_DIR / 'db.sqlite3'
-                                            key_settings[setting_name] = unparsed_value
-                                            # Check if it uses an environment variable
+                                        # --- FIX: Handle list-like settings with a dedicated helper ---
+                                        if setting_name in ["INSTALLED_APPS", "MIDDLEWARE", "STATICFILES_DIRS", "ALLOWED_HOSTS", "AUTHENTICATION_BACKENDS", "LOCALE_PATHS"]:
+                                            key_settings[setting_name] = self._extract_list_from_ast_node(node_item.value)
+                                        else:
+                                            # For other settings, use the existing literal_eval with fallback
+                                            unparsed_value = ast.unparse(node_item.value) # type: ignore
+                                            try:
+                                                key_settings[setting_name] = ast.literal_eval(node_item.value)
+                                            except (ValueError, SyntaxError): # For complex values like BASE_DIR / 'db.sqlite3'
+                                                key_settings[setting_name] = unparsed_value
+                                            
+                                            # Check if it uses an environment variable (only for string-like values)
                                             env_var_match = re.search(r"os\.environ(?:.get)?\(['\"]([^'\"]+)['\"]", unparsed_value)
                                             if env_var_match:
                                                 env_vars_used[setting_name] = env_var_match.group(1)
@@ -1556,41 +1607,40 @@ class CodeIntelligenceService:
                         test_classes_parsed.append(DjangoTestClass(
                             has_setup_test_data=has_setup_test_data,
                             uses_api_client=uses_api_client,
-                            uses_request_factory=uses_request_factory,
-                            **cls_node.model_dump()
+                            uses_request_factory=uses_request_factory, # type: ignore
+                            **cls_node.model_dump(exclude_unset=True)
                         ))
                 file_info.django_test_details = DjangoTestFileDetails(imports=imports, functions=functions, classes=classes, test_classes=test_classes_parsed)
 
-        elif filename.endswith((".html", ".htm", ".djt")): # type: ignore
-            file_info.file_type = "template"
-            extends_match = re.search(r"{%\s*extends\s*['\"]([^'\"]+)['\"]\s*%}", content, re.IGNORECASE)
-            includes = re.findall(r"{%\s*include\s*['\"]([^'\"]+)['\"]\s*%}", content)
-            statics = re.findall(r"{%\s*static\s*['\"]([^'\"]+)['\"]\s*%}", content)
-            url_names = re.findall(r"{%\s*url\s*['\"]([^'\"]+)['\"]", content)
-            context_vars = re.findall(r"{{\s*([\w\.]+)\s*}}", content)
-            i18n_tags = re.findall(r"{%\s*(trans|blocktrans)\s", content)
-            form_action_targets = re.findall(r"<form[^>]*action\s*=\s*['\"]([^'\"]*)['\"]", content, re.IGNORECASE)
-            ids = re.findall(r"id\s*=\s*['\"]([^'\"]+)['\"]", content)
-            file_info.template_details = TemplateFileDetails(
-                extends_template=extends_match.group(1) if extends_match else None,
-                i18n_tags_used=list(set(i18n_tags)),
-                includes_templates=includes,
-                static_files_used=statics,
-                url_references=url_names,
-                context_variables_used=list(set(context_vars))[:20],
-                form_targets=form_action_targets,
-                key_dom_ids=list(set(ids))[:10])
-        elif filename.endswith(".js"): # type: ignore
+        elif filename.endswith((".html", ".htm", ".djt")):
+            file_info.file_type = "template" # Keep generic type for now
+            try:
+                html_parser = HTMLParser(content)
+                file_info.html_details = html_parser.parse()
+                logger.info(f"Successfully parsed HTML file '{file_path_str}' with BeautifulSoup.")
+            except Exception as e:
+                logger.error(f"Failed to parse HTML file '{file_path_str}' with BeautifulSoup parser: {e}", exc_info=True)
+                # Fallback to a raw summary if the new parser fails
+                file_info.raw_content_summary = f"HTML file. Parsing failed: {e}"
+
+        elif filename.endswith((".js", ".mjs")):
             file_info.file_type = "javascript"
-            ajax_urls = re.findall(r"fetch\s*\(\s*['\"]([^'\"]+)['\"]", content)
-            dom_ids = re.findall(r"document\.getElementById\s*\(\s*['\"]([^'\"]+)['\"]\s*\)", content)
-            js_imports = re.findall(r"import\s+.*\s+from\s+['\"]([^'\"]+)['\"]", content)
-            file_info.js_details = JSFileDetails(imports_from=js_imports, ajax_calls_to_urls=ajax_urls, accesses_dom_ids=dom_ids, global_functions=[])
-        elif filename.endswith(".css"):
+            try:
+                js_parser = VanillaJSParser(content, file_path_str)
+                file_info.js_details = js_parser.parse()
+                logger.info(f"Successfully parsed JS file '{file_path_str}'.")
+            except Exception as e:
+                logger.error(f"Failed to parse JS file '{file_path_str}' with regex parser: {e}", exc_info=True)
+                file_info.raw_content_summary = f"JavaScript file. Parsing failed: {e}"
+        elif filename.endswith((".css", ".scss", ".less")):
             file_info.file_type = "css"
-            imports_css = re.findall(r"@import\s*url\s*\(\s*['\"]([^'\"]+)['\"]\s*\);", content)
-            selectors = re.findall(r"([#\.][\w\-]+)\s*\{", content)
-            file_info.css_details = CSSFileDetails(imports_css=imports_css, defines_selectors=list(set(selectors))[:20])
+            try:
+                css_parser = CSSParser(content, file_path_str)
+                file_info.css_details = css_parser.parse()
+                logger.info(f"Successfully parsed CSS/SCSS file '{file_path_str}' with tinycss2.")
+            except Exception as e:
+                logger.error(f"Failed to parse CSS file '{file_path_str}' with tinycss2 parser: {e}", exc_info=True)
+                file_info.raw_content_summary = f"CSS file. Parsing failed: {e}"
         elif filename.endswith(".json"): # type: ignore
             file_info.file_type = "json_data"
             try:

@@ -1,4 +1,4 @@
-# src/utils/check_db.py
+# backend/src/utils/check_db.py
 import os
 import sys
 import logging

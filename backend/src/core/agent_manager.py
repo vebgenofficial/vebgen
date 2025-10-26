@@ -1,4 +1,4 @@
-# src/core/agent_manager.py
+# backend/src/core/agent_manager.py
 import logging
 from typing import Optional, Callable, Dict, Tuple, Union, Awaitable, List, Literal, Any, Type
 import re 
@@ -67,6 +67,10 @@ class AgentManager:
 
         # The actual LLM client instance will be stored here after initialization.
         self.agent: Optional[Union[LlmClient, HuggingFaceClient, GoogleGenAIClient, OpenAIClient]] = None
+        # --- NEW: Rate Limiting ---
+        # Track the time of the last API call to enforce a minimum interval.
+        self.last_api_call_time: Optional[float] = None
+        self.min_request_interval_seconds: int = 30 # Enforce a 30-second delay between requests
 
         # Trigger the initialization process upon creation.
         self._initialize_agent()
@@ -301,6 +305,17 @@ class AgentManager:
             The ChatMessage response from the invoked agent.
         """
         logger.debug(f"Invoking agent with temperature: {temperature}") 
+
+        # --- NEW: Enforce a delay between API calls to avoid rate limiting ---
+        if self.last_api_call_time:
+            elapsed = time.time() - self.last_api_call_time
+            if elapsed < self.min_request_interval_seconds:
+                wait_time = self.min_request_interval_seconds - elapsed
+                logger.info(f"Waiting for {wait_time:.2f} seconds to respect API rate limit interval...")
+                time.sleep(wait_time)
+        # Update the last call time *before* making the new request.
+        self.last_api_call_time = time.time()
+
         # Ensure the agent has been initialized before trying to use it.
         if not self.agent:
             raise RuntimeError("Agent client is not initialized.")

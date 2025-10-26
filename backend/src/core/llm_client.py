@@ -1,4 +1,4 @@
-# src/core/llm_client.py
+# backend/src/core/llm_client.py
 import time
 import logging
 import requests.exceptions # Import specific exceptions

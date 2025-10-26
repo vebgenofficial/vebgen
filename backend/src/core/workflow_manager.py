@@ -1,4 +1,4 @@
-# src/core/workflow_manager.py
+# backend/src/core/workflow_manager.py
 import logging
 import asyncio
 import threading
@@ -20,7 +20,7 @@ import bs4
 from markdown_it import MarkdownIt
 from bs4 import BeautifulSoup, FeatureNotFound # Already imported, good for XML parsing
 import huggingface_hub # Added for potential Hugging Face token management
-from .project_models import FeatureTask
+from .project_models import FeatureTask, FileStructureInfo
 from pydantic import ValidationError
 
 # Import core components
@@ -30,7 +30,7 @@ from .config_manager import ConfigManager, FrameworkPrompts # Keep FrameworkProm
 from .file_system_manager import FileSystemManager
 from .command_executor import CommandExecutor, ConfirmationCallback, IDENTIFIER_REGEX
 # Import project data models, including the new FeatureStatusEnum
-from .project_models import (ProjectState, ProjectFeature, FeatureTask, FeatureStatusEnum, TaskStatus, AppStructureInfo, ProjectStructureMap) # type: ignore
+from .project_models import (ProjectState, ProjectFeature, FeatureTask, FeatureStatusEnum, TaskStatus, AppStructureInfo, ProjectStructureMap, FrontendValidationReport) # type: ignore
 # Import LLM client specifics
 from .llm_client import RateLimitError, ChatMessage, AuthenticationError
 # Import secure storage for placeholder handling and APIContract
@@ -40,6 +40,7 @@ from .secure_storage import store_credential, retrieve_credential, delete_creden
 from .code_intelligence_service import CodeIntelligenceService
 from .security_utils import sanitize_and_validate_input
 from .exceptions import RemediationError, PatchApplyError, CommandExecutionError, InterruptedError
+from .validators.frontend_validator import FrontendValidator
 
 # New Adaptive Workflow Imports
 from .adaptive_agent import AdaptiveAgent
@@ -219,17 +220,21 @@ class WorkflowManager:
                     
                     restored_state = self.memory_manager.restore_from_latest_backup()
                     # ✅ FIX: Check if restored state has actual data
-                    if restored_state and restored_state.features:
+                    if restored_state and (restored_state.features or restored_state.registered_apps):
                         logger.info(f"SUCCESS: Auto-restore succeeded. Loaded {len(restored_state.features)} features from backup.")
                         self.project_state = restored_state
                         self.progress_callback({"system_message": f"Successfully restored {len(restored_state.features)} features from backup."})
                     else:
+                        # SCENARIO 3: Existing project, no VebGen history, no valid backups.
+                        self.logger.info("This appears to be an existing project without VebGen history.")
+                        self.logger.info("Triggering initial project scan to build code intelligence...")
                         if restored_state:
                             logger.warning("Auto-restore loaded a state file, but it was also empty. All available backups may be empty.")
                         else:
                             logger.warning("Auto-restore failed. No valid, non-empty backups could be found.")
                         
                         self.project_state = loaded_state # Fallback to the corrupted (empty) state
+                        self._perform_initial_project_scan()
                         self.progress_callback({"error": "Could not restore from backup. Project history may be lost."})
                 else:
                     # State looks valid
@@ -247,6 +252,178 @@ class WorkflowManager:
         except Exception as e:
             logger.exception(f"Critical error during project load: {e}. Creating a temporary empty state.")
             self.project_state = self.memory_manager.create_new_project_state(project_name_raw="error_state", framework="unknown", project_root=str(self.file_system_manager.project_root))
+
+    def _perform_initial_project_scan(self):
+        """
+        Performs an initial scan of an existing project to populate code intelligence.
+        This is ONLY called for Scenario 3 (external project with no VebGen history).
+        """
+        self.logger.info("="*60)
+        self.logger.info("INITIAL PROJECT SCAN STARTED")
+        self.logger.info("="*60)
+
+        try:
+            project_root = Path(self.project_state.root_path)
+            file_summaries: Dict[str, str] = {}
+
+            # Step 1: Scan Python files
+            self.logger.info("Step 1/5: Scanning Python files...")
+            python_files = [
+                f for f in project_root.rglob("*.py")
+                if not any(part in f.parts for part in ['venv', 'env', '.venv', '__pycache__', 'node_modules'])
+            ]
+            self.logger.info(f"Found {len(python_files)} Python files to analyze.")
+
+            # === NEW: Step 1.5 - Scan Frontend Files ===
+            self.logger.info("Step 1.5/5: Scanning frontend files (HTML/CSS/JS)...")
+            
+            # Find HTML, CSS, and JS files, excluding common ignored directories
+            excluded_dirs_for_scan = ['node_modules', 'venv', 'env', '.venv', '__pycache__', '.git', 'dist', 'build']
+            
+            html_files = [f for f in project_root.rglob('*.html') if not any(part in f.parts for part in excluded_dirs_for_scan)]
+            css_files = [f for f in project_root.rglob('*.css') if not any(part in f.parts for part in excluded_dirs_for_scan)]
+
+            # --- FIX: Intelligent JS file filtering to avoid large/minified/vendor files ---
+            js_files = []
+            # Add Django admin static files to the exclusion list for JS
+            js_excluded_dirs = excluded_dirs_for_scan + ['staticfiles/admin', 'vendor', 'libs', 'library']
+            
+            for js_file in project_root.rglob('**/*.js'):
+                # Skip if in an excluded directory
+                if any(excluded_dir in str(js_file) for excluded_dir in js_excluded_dirs):
+                    continue
+                
+                # Skip minified files
+                if '.min.js' in js_file.name:
+                    logger.debug(f"Skipping minified JS file: {js_file.relative_to(project_root)}")
+                    continue
+                
+                # Skip very large files (>100KB is a good heuristic for vendor code)
+                if js_file.stat().st_size > 100_000:
+                    logger.debug(f"Skipping large JS file ({js_file.stat().st_size / 1024:.1f} KB): {js_file.relative_to(project_root)}")
+                    continue
+                
+                js_files.append(js_file)
+            # --- END FIX ---
+            
+            all_files_to_scan = python_files + html_files + css_files + js_files
+            logger.info(f"Found {len(html_files)} HTML, {len(css_files)} CSS, {len(js_files)} JS files. Total files to scan: {len(all_files_to_scan)}")
+
+            # Step 2: Parse each file and store FULL AST DATA
+            for idx, file_path in enumerate(all_files_to_scan, 1):
+                try:
+                    relative_path = str(file_path.relative_to(project_root))
+
+                    # Use CodeIntelligenceService to parse the file
+                    file_content = self.file_system_manager.read_file(relative_path)
+                    if file_content is None:
+                        self.logger.warning(f"Skipping empty or unreadable file: {relative_path}")
+                        continue
+
+                    # --- NEW: Add progress indicator logging ---
+                    if idx % 10 == 0 or idx == len(all_files_to_scan):
+                        progress_pct = (idx / len(all_files_to_scan)) * 100
+                        logger.info(f"Scan Progress: {idx}/{len(all_files_to_scan)} files parsed ({progress_pct:.1f}%).")
+
+                    file_info = self.code_intelligence_service.parse_file(relative_path, file_content)
+
+                    if file_info:
+                        # Update the project structure map with the detailed parsed info
+                        self.code_intelligence_service._update_project_structure_map_with_file_info(
+                            self.project_state, # type: ignore
+                            relative_path,
+                            file_info
+                        )
+
+                        # Generate a simple text summary for the code_summaries dictionary
+                        summary = self._generate_file_summary(file_info, relative_path)
+                        file_summaries[relative_path] = summary
+                        # --- FIX for test_workflow_manager ---
+                        # If a model file was parsed, update the defined_models state
+                        if file_info.file_type == "django_model" and file_info.django_model_details:
+                            app_name = Path(relative_path).parent.name
+                            self.project_state.defined_models[app_name] = [m.name for m in file_info.django_model_details.models]
+                        self.logger.debug(f"Parsed: {summary}")
+
+                except Exception as e:
+                    self.logger.warning(f"Failed to parse file {file_path}: {e}")
+                    continue
+            
+            # === END NEW/MODIFIED SECTION ===
+
+            # Step 3: Update project state with all summaries
+            self.logger.info(f"Step 3/5: Updating project state with {len(file_summaries)} file summaries...")
+            if self.project_state:
+                self.project_state.code_summaries.update(file_summaries)
+
+            # Step 4: Detect Django apps from INSTALLED_APPS
+            self.logger.info("Step 4/5: Analyzing Django project structure...")
+
+            if self.project_state and self.project_state.framework == "django":
+                # Find settings.py
+                settings_files = list(self.file_system_manager.project_root.rglob("settings.py"))
+
+                if settings_files:
+                    settings_file = settings_files[0]
+                    relative_settings = str(settings_file.relative_to(self.file_system_manager.project_root))
+
+                    # Parse settings.py using CodeIntelligenceService
+                    settings_content = self.file_system_manager.read_file(relative_settings)
+                    if settings_content:
+                        settings_info = self.code_intelligence_service.parse_file(relative_settings, settings_content)
+
+                        if settings_info and settings_info.django_settings_details:
+                            # Extract installed apps from the parsed settings
+                            installed_apps = settings_info.django_settings_details.key_settings.get("INSTALLED_APPS", [])
+
+                            # Filter to get only user apps
+                            user_apps = [
+                                app.split('.')[0] for app in installed_apps
+                                if not app.startswith('django.contrib') and not app.startswith('django.')
+                            ]
+
+                            self.project_state.registered_apps = set(user_apps)
+                            self.logger.info(f"Detected {len(user_apps)} user apps from settings.py: {sorted(user_apps)}")
+
+            # Step 5: Save the populated state
+            self.logger.info("Step 5/5: Saving populated project state...")
+            if self.project_state:
+                self.memory_manager.save_project_state(self.project_state)
+
+            self.logger.info("="*60)
+            self.logger.info("✅ INITIAL PROJECT SCAN COMPLETE")
+            self.logger.info(f"   - Scanned: {len(file_summaries)} files")
+            if self.project_state:
+                self.logger.info(f"   - Detected apps: {len(self.project_state.registered_apps)}")
+                self.logger.info(f"   - Detected models: {sum(len(models) for models in self.project_state.defined_models.values())}")
+            self.logger.info("="*60)
+
+        except Exception as e:
+            self.logger.error(f"Initial project scan failed: {e}", exc_info=True)
+
+    @staticmethod
+    def _generate_file_summary(file_info: FileStructureInfo, relative_path: str) -> str:
+        """Generates a one-line summary string from a parsed FileStructureInfo object."""
+        summary_parts = []
+        if file_info.python_details:
+            summary_parts.append(f"Imports: {len(file_info.python_details.imports)}")
+            summary_parts.append(f"Funcs: {len(file_info.python_details.functions)}")
+            summary_parts.append(f"Classes: {len(file_info.python_details.classes)}")
+        if file_info.django_model_details and file_info.django_model_details.models:
+            summary_parts.append(f"Models: {len(file_info.django_model_details.models)}")
+        if file_info.django_view_details and file_info.django_view_details.views:
+            summary_parts.append(f"Views: {len(file_info.django_view_details.views)}")
+        if file_info.html_details:
+            form_count = len(file_info.html_details.forms)
+            if form_count > 0:
+                summary_parts.append(f"Forms: {form_count}")
+        if file_info.css_details:
+            summary_parts.append(f"CSS Rules: {len(file_info.css_details.rules)}")
+        if file_info.js_details:
+            summary_parts.append(f"JS Funcs: {len(file_info.js_details.functions)}")
+
+        summary_text = f"{relative_path}: " + ", ".join(summary_parts) if summary_parts else f"{relative_path}: Parsed"
+        return summary_text
 
     def can_continue(self) -> Optional[ProjectFeature]:
         """
@@ -664,13 +841,46 @@ class WorkflowManager:
                         # by the outer loop, which will gracefully terminate the workflow.
                         raise
                     # --- END FIX ---
-
+    
                     self._report_error(f"CASE agent failed during execution: {e}")
                     logger.exception(f"Error in CASE agent for feature: {current_feature_instruction}")
-                    completion_percentage = 0
-                    issues = [f"The agent's execution was interrupted by an error: {e}"]
-                    work_log = case_agent.work_history # Get whatever history exists
-
+                    
+                    # ✅ FIX: Get work history safely
+                    work_log = case_agent.work_history if hasattr(case_agent, 'work_history') else []
+                    
+                    # ✅ FIX: Check filesystem for actual completed files
+                    verified_completed_files = []
+                    logger.info(f"Verifying existence of {len(cumulative_modified_files)} file(s) from cumulative_modified_files...")
+                    
+                    for filepath in cumulative_modified_files:
+                        if self.file_system_manager.file_exists(filepath):
+                            verified_completed_files.append(filepath)
+                            logger.info(f"✓ Verified file exists on disk: {filepath}")
+                        else:
+                            logger.warning(f"✗ File not found on disk: {filepath}")
+                    
+                    # ✅ FIX: Calculate real completion percentage based on verified files
+                    if verified_completed_files:
+                        # Progress WAS made despite the error!
+                        num_verified = len(verified_completed_files)
+                        num_expected = max(len(cumulative_modified_files), 3)  # Assume at least 3 files per feature
+                        
+                        completion_percentage = min(90, int((num_verified / num_expected) * 100))
+                        
+                        logger.warning(
+                            f"Despite error, {num_verified} file(s) were successfully created and verified on disk: "
+                            f"{verified_completed_files}"
+                        )
+                        
+                        issues = [
+                            f"Agent execution was interrupted by error: {str(e)[:150]}",
+                            f"However, {num_verified} file(s) were successfully created before the error occurred.",
+                            f"Completed files: {', '.join(verified_completed_files[:5])}"
+                        ]
+                    else:
+                        # No verified files found - true failure
+                        completion_percentage = 0
+                        issues = [f"The agent's execution was interrupted by an error: {e}"]
                 try:
                     # Only call TARS for verification if the agent execution didn't already fail
                     if completion_percentage == -1:
@@ -704,11 +914,18 @@ class WorkflowManager:
                                 "Verify completion based on successful command execution in the work log."
                             )
 
+                        # --- NEW: Generate and include frontend validation summary ---
+                        final_validator = FrontendValidator(self.project_state.project_structure_map)
+                        final_report = final_validator.validate()
+                        frontend_validation_summary = self._generate_frontend_validation_summary(final_report)
+                        # --- END NEW ---
+
                         verification_prompt = TARS_VERIFICATION_PROMPT.format(
                             feature_description=feature_desc,
                             work_log="\n".join(complete_work_log),
                             code_written=code_written_str,
-                            tech_stack=self.project_state.framework # type: ignore
+                            tech_stack=self.project_state.framework, # type: ignore
+                            frontend_validation_summary=frontend_validation_summary
                         )
                         messages = [
                             {"role": "system", "content": "You are a quality assurance expert."},
@@ -723,11 +940,52 @@ class WorkflowManager:
                             cleaned_json_str = re.sub(r"```(?:json)?\s*(.*)\s*```", r"\1", verification_result_raw, flags=re.DOTALL)
                             verification_data = json.loads(cleaned_json_str)
                             completion_percentage = verification_data.get("completion_percentage", 0)
-                            issues = verification_data.get("issues", ["TARS provided an invalid verification response."])
+                            issues = verification_data.get("issues", ["TARS provided an invalid verification response."]) # type: ignore
                         except json.JSONDecodeError:
-                            self._report_error(f"TARS verification response was not valid JSON: {verification_result_raw}")
-                            completion_percentage = 0
-                            issues = [f"The verification agent returned a malformed (non-JSON) response: {verification_result_raw}"]
+                            logger.warning(
+                                f"TARS verification response was not valid JSON. "
+                                f"Falling back to filesystem verification. Raw response: {verification_result_raw[:200]}"
+                            )
+                            
+                            # ✅ FIX: Instead of assuming 0%, check filesystem for actual completed files
+                            verified_files = []
+                            logger.info(
+                                f"Verifying existence of {len(cumulative_modified_files)} file(s) "
+                                f"from cumulative_modified_files..."
+                            )
+                            
+                            for filepath in cumulative_modified_files:
+                                if self.file_system_manager.file_exists(filepath):
+                                    verified_files.append(filepath)
+                                    logger.info(f"✓ Verified file exists on disk: {filepath}")
+                                else:
+                                    logger.warning(f"✗ File not found on disk: {filepath}")
+                            
+                            # Calculate real completion percentage based on verified files
+                            if verified_files:
+                                # Progress WAS made despite JSON parsing failure!
+                                num_verified = len(verified_files)
+                                num_expected = max(len(cumulative_modified_files), 3)
+                                
+                                completion_percentage = min(90, int((num_verified / num_expected) * 100))
+                                
+                                logger.warning(
+                                    f"Despite JSON parsing error, {num_verified} file(s) were successfully "
+                                    f"created and verified on disk: {verified_files}"
+                                )
+                                
+                                issues = [
+                                    f"TARS returned malformed response, but {num_verified} file(s) were verified on disk.",
+                                    f"Completed files: {', '.join(verified_files[:5])}",
+                                    f"The verification agent returned non-JSON prose instead of structured response."
+                                ]
+                            else:
+                                # No verified files found - true failure
+                                completion_percentage = 0
+                                issues = [
+                                    f"The verification agent returned a malformed (non-JSON) response AND "
+                                    f"no files were found on disk: {verification_result_raw[:200]}"
+                                ]
                         # --- END NEW ---
                     
                     # This block now correctly handles both successful verification and all failure cases (LLM error, JSON error, or <100% completion)
@@ -800,6 +1058,25 @@ class WorkflowManager:
         # Other helper methods like get_current_state_for_ui, save_project_state, etc. can remain.
     def get_project_state(self):
         return self.project_state
+
+    def _generate_frontend_validation_summary(self, report: FrontendValidationReport) -> str:
+        """Formats the frontend validation report into a string for the TARS prompt."""
+        if not report.issues:
+            return "No frontend validation issues found. Looks good."
+
+        from collections import defaultdict
+        severity_counts = defaultdict(int)
+        category_counts = defaultdict(int)
+        for issue in report.issues:
+            severity_counts[issue.severity] += 1
+            category_counts[issue.category] += 1
+
+        summary_lines = [f"Total Issues: {report.total_issues}"]
+        summary_lines.append("By Severity: " + ", ".join(f"{count} {sev}" for sev, count in severity_counts.items()))
+        summary_lines.append("By Category: " + ", ".join(f"{count} {cat}" for cat, count in category_counts.items()))
+
+        return "\n".join(summary_lines)
+
 
     def save_current_project_state(self):
         if self.project_state:

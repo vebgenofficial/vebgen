@@ -1,4 +1,4 @@
-# src/plugins/node/adaptive_prompts.py
+# backend/src/plugins/node/adaptive_prompts.py
 
 NODE_ADAPTIVE_AGENT_RULES = """
 **Node.js (Express) Development Recommendations for a High Success Rate:**

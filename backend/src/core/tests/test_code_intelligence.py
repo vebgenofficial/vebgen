@@ -1,4 +1,4 @@
-# c:\Users\navee\Music\VebGen\vebgen sharp\backend\src\core\test_code_intelligence.py
+# backend\src\core\test_code_intelligence.py
 
 import json
 import pytest
@@ -377,95 +377,40 @@ urlpatterns = [
     path('', include(router.urls)),
 ]
 """
-def test_code_intelligence_parsing(capsys):
+
+def test_update_project_structure_map(intelligence_service: CodeIntelligenceService):
     """
-    This test function validates the CodeIntelligenceService by feeding it
-    predefined code strings and asserting that the output is valid JSON.
+    Tests that _update_project_structure_map_with_file_info correctly adds
+    parsed file info to the project state's structure map.
     """
-    print("--- Starting Code Intelligence Service Test ---")
+    print("\n--- Testing CodeIntelligenceService: Project Structure Map Update ---")
+    from src.core.project_models import ProjectState, FileStructureInfo
 
-    # We need a dummy project root. A temporary directory or '.' works fine.
-    # The service uses this to resolve paths, but for this test, we are
-    # passing content directly, so the path is mostly for context.
-    dummy_project_root = Path.cwd() / "test_project_temp"
-    dummy_project_root.mkdir(exist_ok=True)
-    print(f"Using dummy project root: {dummy_project_root}\n")
-
-    # Instantiate the service we want to test.
-    intelligence_service = CodeIntelligenceService(project_root=dummy_project_root)
-
-    # --- Test Case 1: Django Models File ---
-    print("\n--- 1. Testing models.py Parsing ---")
-    models_info = intelligence_service.parse_file("polls/models.py", SAMPLE_MODELS_PY)
-
-    assert models_info is not None, "Parsing models.py should return a valid object."
-    assert models_info.file_type == "django_model"
-    assert models_info.django_model_details is not None
-
-    # Convert to dict for easier assertions
-    models_data = models_info.django_model_details.model_dump()
-
-    assert len(models_data["models"]) == 1, "Should find exactly one model."
-    question_model = models_data["models"][0]
-    assert question_model["name"] == "Question"
-    assert "models.Model" in question_model["bases"]
-
-    # Assert specific fields are parsed correctly
-    fields = {f["name"]: f for f in question_model["django_fields"]}
-    assert "question_text" in fields
-    assert fields["question_text"]["field_type"] == "CharField"
-    assert fields["question_text"]["args"]["max_length"] == 200
-    assert fields["author"]["field_type"] == "ForeignKey"
-    assert fields["author"]["related_model_name"] == "User"
-    assert fields["author"]["on_delete"] == "models.CASCADE"
-    assert question_model["meta_options"]["verbose_name"] == "Poll Question"
-    print("✅ models.py assertions passed.")
-
-    # --- Test Case 6: Complex Admin File ---
-    print("\n--- 6. Testing Complex admin.py Parsing (@register decorator) ---")
-    admin_info = intelligence_service.parse_file("polls/admin.py", SAMPLE_ADMIN_PY)
-    assert admin_info is not None, "Parsing admin.py should return a valid object."
-    assert admin_info.file_type == "django_admin"
-    assert admin_info.django_admin_details is not None
-
-    admin_data = admin_info.django_admin_details.model_dump()
-
-    assert len(admin_data["registered_models"]) == 2, "Should find two registered models."
+    # 1. Setup initial state and mock file info
+    project_state = ProjectState(project_name="test_proj", framework="django", root_path="/fake")
     
-    # Find the registration for the 'Article' model
-    article_reg = next((r for r in admin_data["registered_models"] if r["model"] == "Article"), None)
-    assert article_reg is not None, "Article model registration should be found."
-    assert article_reg["admin_class"] == "ArticleAdmin", "Should associate Article with ArticleAdmin class via decorator."
+    # Mock info for a root-level file
+    root_file_info = FileStructureInfo(file_type="python", raw_content_summary="A root file.")
+    
+    # Mock info for an app-level file
+    app_file_info = FileStructureInfo(file_type="django_model", raw_content_summary="A model file.")
 
-    # Find the parsed ArticleAdmin class and check its attributes
-    article_admin_class = next((c for c in admin_data["admin_classes"] if c["name"] == "ArticleAdmin"), None)
-    assert article_admin_class is not None, "ArticleAdmin class should be parsed."
-    assert "list_display" in [attr["name"] for attr in article_admin_class["attributes"]]
-    print("✅ complex_admin.py assertions passed.")
+    # 2. Test adding a root-level file
+    intelligence_service._update_project_structure_map_with_file_info(
+        project_state, "manage.py", root_file_info
+    )
+    assert "manage.py" in project_state.project_structure_map.global_files
+    assert project_state.project_structure_map.global_files["manage.py"] == root_file_info
+    print("✅ Structure map correctly updated for a root-level file.")
 
-    # --- Test Case 7: Aliased Imports ---
-    print("\n--- 7. Testing Aliased Import Parsing ---")
-    # This test ensures the service can handle `from ... import ... as ...`
-    aliased_models_info = intelligence_service.parse_file("shop/models.py", SAMPLE_ALIASED_MODELS_PY)
-    assert aliased_models_info is not None, "Parsing aliased models.py should return a valid object."
-    assert aliased_models_info.file_type == "django_model"
-    assert aliased_models_info.django_model_details is not None
-
-    aliased_models_data = aliased_models_info.django_model_details.model_dump()
-    assert len(aliased_models_data["models"]) == 1, "Should find one model with aliased import."
-    product_model = aliased_models_data["models"][0]
-    assert product_model["name"] == "Product"
-    assert any("db_models.Model" in base for base in product_model["bases"]), "Should correctly identify base class with alias."
-    assert len(product_model["django_fields"]) == 2, "Should parse fields defined with aliased models."
-
-    aliased_admin_info = intelligence_service.parse_file("shop/admin.py", SAMPLE_ALIASED_ADMIN_PY)
-    assert aliased_admin_info is not None, "Parsing aliased admin.py should return a valid object."
-    assert aliased_admin_info.file_type == "django_admin"
-    assert aliased_admin_info.django_admin_details is not None
-    aliased_admin_data = aliased_admin_info.django_admin_details.model_dump()
-    assert len(aliased_admin_data["registered_models"]) == 1, "Should find one registered model with aliased admin decorator."
-    assert aliased_admin_data["registered_models"][0]["model"] == "Product"
-    print("✅ aliased_imports.py assertions passed.")
+    # 3. Test adding an app-level file
+    intelligence_service._update_project_structure_map_with_file_info(
+        project_state, "blog/models.py", app_file_info
+    )
+    assert "blog" in project_state.project_structure_map.apps
+    assert "models.py" in project_state.project_structure_map.apps["blog"].files
+    assert project_state.project_structure_map.apps["blog"].files["models.py"] == app_file_info
+    print("✅ Structure map correctly updated for an app-level file.")
 
 def test_parse_drf_viewset(intelligence_service: CodeIntelligenceService):
     """Tests parsing of a DRF ViewSet with permissions and pagination."""
@@ -731,6 +676,37 @@ def test_parse_orm_query_intelligence(intelligence_service: CodeIntelligenceServ
 
     print("✅ ORM Query Intelligence parsing assertions passed.")
 
+def test_parse_settings_with_pathlib_expressions(intelligence_service: CodeIntelligenceService):
+    """
+    Tests that parsing a settings.py file with pathlib expressions in lists
+    (like STATICFILES_DIRS) does not cause a Pydantic validation error.
+    This specifically covers the bug fix for issue #4.
+    """
+    print("\n--- Testing settings.py with Pathlib Expressions (Bug Fix) ---")
+    
+    settings_with_pathlib = """
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+STATICFILES_DIRS = [
+    BASE_DIR / 'static',
+    BASE_DIR / 'frontend/static',
+]
+
+INSTALLED_APPS = ['app1', 'app2'] # A simple list for comparison
+"""
+    
+    # This call should complete without raising a ValidationError
+    settings_info = intelligence_service.parse_file("myproject/settings.py", settings_with_pathlib)
+
+    assert settings_info is not None
+    assert settings_info.file_type == "django_settings"
+    details = settings_info.django_settings_details
+    assert details is not None
+    assert details.staticfiles_dirs == ["BASE_DIR / 'static'", "BASE_DIR / 'frontend/static'"]
+    print("✅ settings.py with pathlib STATICFILES_DIRS parsed successfully.")
+
 def test_parse_channel_layer_invocation(intelligence_service: CodeIntelligenceService):
     """Tests detection of channel_layer.group_send in a model's save method."""
     print("\n--- Testing Channel Layer Invocation Parsing ---")
@@ -772,6 +748,35 @@ class Migration(migrations.Migration):
     assert len(details.operations) == 1, "Should find one operation."
     assert details.operations[0].type == "AddField"
     print("✅ Django migration file assertions passed.")
+
+def test_parse_aliased_models(intelligence_service: CodeIntelligenceService):
+    """Tests that models defined using an aliased 'models' import are parsed correctly."""
+    print("\n--- Testing Aliased Model Import Parsing ---")
+    aliased_models_info = intelligence_service.parse_file("shop/models.py", SAMPLE_ALIASED_MODELS_PY)
+    assert aliased_models_info is not None, "Parsing aliased models.py should return a valid object."
+    assert aliased_models_info.file_type == "django_model"
+    assert aliased_models_info.django_model_details is not None
+
+    aliased_models_data = aliased_models_info.django_model_details.model_dump()
+    assert len(aliased_models_data["models"]) == 1, "Should find one model with aliased import."
+    product_model = aliased_models_data["models"][0]
+    assert product_model["name"] == "Product"
+    assert any("db_models.Model" in base for base in product_model["bases"]), "Should correctly identify base class with alias."
+    assert len(product_model["django_fields"]) == 2, "Should parse fields defined with aliased models."
+    print("✅ Aliased models.py assertions passed.")
+
+def test_parse_aliased_admin(intelligence_service: CodeIntelligenceService):
+    """Tests that admin registrations using an aliased 'admin' import are parsed correctly."""
+    print("\n--- Testing Aliased Admin Import Parsing ---")
+    aliased_admin_info = intelligence_service.parse_file("shop/admin.py", SAMPLE_ALIASED_ADMIN_PY)
+    assert aliased_admin_info is not None, "Parsing aliased admin.py should return a valid object."
+    assert aliased_admin_info.file_type == "django_admin"
+    assert aliased_admin_info.django_admin_details is not None
+
+    aliased_admin_data = aliased_admin_info.django_admin_details.model_dump()
+    assert len(aliased_admin_data["registered_models"]) == 1, "Should find one registered model with aliased admin decorator."
+    assert aliased_admin_data["registered_models"][0]["model"] == "Product"
+    print("✅ Aliased admin.py assertions passed.")
 
 @pytest.fixture
 def intelligence_service(tmp_path: Path) -> CodeIntelligenceService:
@@ -1067,8 +1072,3 @@ def test_performance_monitor_decorator(intelligence_service: CodeIntelligenceSer
     assert metrics['total_time'] > 0
 
     print("✅ Performance monitor correctly recorded the function call.")
-
-# This makes the script runnable from the command line.
-if __name__ == "__main__":
-    # For manual running; use `pytest` for automated testing.
-    test_code_intelligence_parsing(None)

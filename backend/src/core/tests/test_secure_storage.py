@@ -1,4 +1,4 @@
-# c/Users/USER/Documents/webagent/vebgen sharp updated/backend/src/core/tests/test_secure_storage.py
+# backend/src/core/tests/test_secure_storage.py
 import pytest
 from unittest.mock import patch, MagicMock
 from keyring.errors import KeyringError, PasswordDeleteError

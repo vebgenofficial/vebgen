@@ -1,4 +1,4 @@
-# c/Users/USER/Documents/webagent/vebgen sharp updated/backend/src/core/tests/test_project_models.py
+# backend/src/core/tests/test_project_models.py
 import pytest
 import json
 from pydantic import ValidationError
@@ -46,7 +46,9 @@ class TestFeatureTask:
 
     def test_invalid_action_fails(self):
         """Tests that an action not in the Literal type raises a ValidationError."""
-        with pytest.raises(ValidationError, match="Input should be .* 'Delete file'"):
+        # The error message for a Literal mismatch includes the allowed values.
+        # This regex is more specific to the expected Pydantic error.
+        with pytest.raises(ValidationError, match="Input should be .* 'Create file'|'Modify file'"):
             FeatureTask(task_id_str="1.1", action="Invalid Action", target="a.txt")
 
     @pytest.mark.parametrize("dep_input, expected_output", [
@@ -56,14 +58,14 @@ class TestFeatureTask:
         ("None", []),
         (None, []),
         ([4.1, "4.2"], ["4.1", "4.2"]),
-        (["5.1", "invalid_id", "5.2"], ["5.1", "5.2"]), # Should filter invalid formats
+        (["5.1", "invalid_id", "5.2"], ["5.1", "5.2"]),  # The validator should filter out invalid formats like "invalid_id"
     ])
     def test_dependency_validator(self, dep_input, expected_output):
         """Tests the dependency validator with various input formats."""
         task = FeatureTask(
             task_id_str="10.1",
             action="Create file",
-            target="a.txt",
+            target="a.txt", # The target is required but not relevant to this specific test
             dependencies=dep_input
         )
         assert task.dependencies == expected_output

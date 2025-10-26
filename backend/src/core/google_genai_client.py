@@ -1,4 +1,4 @@
-# src/core/google_genai_client.py
+# backend/src/core/google_genai_client.py
 import logging
 import google.generativeai as genai
 from typing import List, Optional

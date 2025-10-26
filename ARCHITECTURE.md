@@ -29,12 +29,13 @@
 5. **Continuous State Persistence** - 5 rolling backups with SHA-256 verification
 6. **Plugin Architecture** - Framework-specific prompts loaded dynamically (Django, Flask, Node.js)
 7. **Multi-Provider Support** - 120+ models across OpenAI, Anthropic, Google, OpenRouter, Hugging Face
+8. **Frontend Quality Enforcement (v0.3.0)** - WCAG 2.1 compliance and Lighthouse-style performance checks built-in
 
 ---
 
 ## 🏛️ Core Architecture
 
-VebGen is organized into **6 architectural layers**:
+VebGen is organized into **7 architectural layers**:
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
@@ -56,6 +57,11 @@ VebGen is organized into **6 architectural layers**:
 │ Layer 4: Intelligence Services │
 │ code_intelligence_service.py - context_manager.py - │
 │ memory_manager.py - project_models.py │
+└─────────────────────────────────────────────────────────────┘
+ ↓↑
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 4.5: Frontend Validation Layer 🆕 (v0.3.0) │
+│ frontend_validator.py - parsers/ - analyzers/ - validators/│
 └─────────────────────────────────────────────────────────────┘
  ↓↑
 ┌─────────────────────────────────────────────────────────────┐
@@ -83,22 +89,37 @@ VebGen is organized into **6 architectural layers**:
 #### Layer 2: Orchestration (162 KB)
 **Purpose**: Coordinates TARS/CASE workflow and manages LLM communication
 
-- **workflow_manager.py** (142 KB) - Dual-agent orchestration, 13 feature states, remediation loops
+- **workflow_manager.py** (157 KB) - Dual-agent orchestration, 13 feature states, remediation loops
 - **agent_manager.py** (20 KB) - LLM client factory, provider switching, unified chat interface
 
 #### Layer 3: AI Agents (87 KB)
 **Purpose**: Executes AI-driven development tasks
 
-- **adaptive_agent.py** (61 KB) - CASE execution loop with 9 actions (WRITE_FILE, RUN_COMMAND, etc.)
-- **adaptive_prompts.py** (26 KB) - Framework-specific workflow rules (Django: 11 steps, Flask: 7 steps, Node: 8 steps)
+- **adaptive_agent.py** (67 KB) - CASE execution loop with 9 actions (WRITE_FILE, RUN_COMMAND, etc.)
+- **adaptive_prompts.py** (27 KB) - Framework-specific workflow rules (Django: 11 steps, Flask: 7 steps, Node: 8 steps)
 
-#### Layer 4: Intelligence Services (175 KB)
-**Purpose**: Provides zero-token code analysis and state management
+#### Layer 4: Intelligence Services (220 KB - includes frontend validation)
+**Purpose**: Provides zero-token code analysis, state management, and frontend quality enforcement
 
-- **code_intelligence_service.py** (106 KB) - AST parser for 95+ Django constructs, caching
-- **context_manager.py** (21 KB) - Token optimization with 3-tier pruning strategy
-- **memory_manager.py** (49 KB) - State persistence with 5 rolling backups, SHA-256 verification
-- **project_models.py** (35 KB) - Pydantic schemas for features, tasks, errors (13 models)
+**Backend Intelligence:**
+- **code_intelligence_service.py** (109 KB) - AST parser for 95+ Django constructs + frontend files
+- **context_manager.py** (21 KB) - Token optimization with 3-tier pruning
+- **memory_manager.py** (49 KB) - State persistence with 5 rolling backups
+- **project_models.py** (35 KB) - Pydantic schemas for features, tasks, errors
+
+**Frontend Intelligence (v0.3.0 🆕):**
+- **frontend_validator.py** (6.7 KB) - Validation orchestration
+- **parsers/** (37 KB) - HTMLParser, CSSParser, VanillaJSParser
+- **analyzers/** (11 KB) - Accessibility + Performance analysis
+- **validators/** (4.6 KB) - Cross-file integrity checks
+
+#### Layer 4.5: Frontend Validation (NEW in v0.3.0) (45 KB)
+**Purpose**: Enforces WCAG 2.1 and production-grade frontend quality
+
+- **frontend_validator.py** (6.7 KB) - Orchestrates 7 validators, blocks features with critical issues
+- **parsers/** (37 KB) - HTMLParser (13 KB), CSSParser (11 KB), VanillaJSParser (12 KB)
+- **analyzers/** (11 KB) - AccessibilityAnalyzer (4 KB), PerformanceAnalyzer (7 KB)
+- **validators/** (11 KB) - JSHTMLValidator (4.6 KB) for cross-file integrity
 
 #### Layer 5: Infrastructure (174 KB)
 **Purpose**: Secure file operations, command execution, configuration
@@ -159,13 +180,25 @@ Complete list of all documented components with sizes, purposes, and links to de
 | **Framework Prompts** | 166 KB | Django expert prompts (166 KB), Flask/React/Node placeholders | [📖 Docs](framework_prompts.md) |
 | **Adaptive Prompts** | 6 KB | Workflow checklists for Django (11 steps), Flask (7), Node.js (8) | [📖 Docs](adaptive_prompts.md) |
 
+### Frontend Validation Components (v0.3.0 🆕)
+
+| Component | File Size | Purpose | Documentation |
+|-----------|-----------|---------|---------------|
+| **Frontend Validator** | 6.7 KB | Orchestrates HTML/CSS/JS validation, enforces WCAG 2.1 compliance | [📖 Docs](frontend_validator.md) |
+| **HTML Parser** | 13 KB | Parses HTML for semantic structure, forms, accessibility issues | [📖 Docs](html_parser.md) |
+| **CSS Parser** | 11 KB | Validates CSS for WCAG compliance, responsive design, BEM | [📖 Docs](css_parser.md) |
+| **Vanilla JS Parser** | 12 KB | Analyzes JavaScript for security issues, API calls, DOM patterns | [📖 Docs](vanilla_js_parser.md) |
+| **Accessibility Analyzer** | 4 KB | Maps HTML/CSS issues to WCAG 2.1 criteria | [📖 Docs](analyzers.md) |
+| **Performance Analyzer** | 7 KB | Lighthouse-style audits for render-blocking, dead code, page weight | [📖 Docs](analyzers.md) |
+| **JS-HTML Validator** | 4.6 KB | Cross-file integrity checks (orphaned selectors, broken refs) | [📖 Docs](js_html_validator.md) |
+
 ### UI Components
 
 | Component | File Size | Purpose | Documentation |
 |-----------|-----------|---------|---------------|
 | **UI Components** | 194 KB | Main window, manual command dialog, tooltips (CustomTkinter) | [📖 Docs](ui_components.md) |
 
-**Total Documentation**: 850+ KB across 15 detailed technical documents
+**Total Documentation**: 900+ KB across 21 detailed technical documents
 
 ---
 
@@ -264,6 +297,52 @@ WM->>UI: Feature finished
 UI-->>User: "Blog feature deployed! 🎉"
 ```
 
+### Frontend Validation Flow (v0.3.0 🆕)
+
+```mermaid
+sequenceDiagram
+participant CASE
+participant FSM as File System
+participant FV as Frontend Validator
+participant HTML as HTML Parser
+participant CSS as CSS Parser
+participant JS as JS Parser
+participant AA as Accessibility Analyzer
+participant PA as Performance Analyzer
+participant TARS
+
+CASE->>FSM: write_file("template.html")
+FSM-->>CASE: ✅ File written
+
+Note over CASE: Feature execution complete
+
+CASE->>FV: validate()
+FV->>HTML: parse("template.html")
+HTML-->>FV: HTMLFileDetails + issues
+FV->>CSS: parse("style.css")
+CSS-->>FV: CSSFileDetails + issues
+FV->>JS: parse("script.js")
+JS-->>FV: VanillaJSFileDetails + issues
+
+FV->>AA: analyze(project_map)
+AA-->>FV: WCAG issues list
+FV->>PA: analyze(project_map)
+PA-->>FV: Performance issues list
+
+alt Critical Issues Found
+FV-->>CASE: ❌ Validation FAILED
+CASE->>TARS: Request remediation
+TARS-->>CASE: "Add alt text to images"
+CASE->>FSM: Update files
+CASE->>FV: validate() (retry)
+FV-->>CASE: ✅ Validation PASSED
+else No Critical Issues
+FV-->>CASE: ✅ Validation PASSED
+end
+
+Note over CASE: Feature completes only after validation
+```
+
 ### Error Recovery Flow
 
 ```mermaid
@@ -354,6 +433,9 @@ style Error fill:#fff9c4
 | **subprocess** | Built-in | Command execution |
 | **json** | Built-in | Configuration files |
 | **logging** | Built-in | Application logging |
+| **BeautifulSoup4** | Latest | HTML parsing for frontend validation |
+| **esprima** | Latest | JavaScript AST parsing |
+| **re (regex)** | Built-in | CSS selector extraction |
 
 ### LLM Integrations
 
@@ -381,20 +463,21 @@ style Error fill:#fff9c4
 ### Workflow Manager Dependencies
 
 ```text
-workflow_manager.py (142 KB)
+workflow_manager.py (157 KB)
 ├── adaptive_agent.py # CASE execution
 ├── agent_manager.py # LLM communication
 ├── memory_manager.py # State persistence
 ├── code_intelligence_service.py # AST analysis
 ├── file_system_manager.py # File operations
 ├── project_models.py # Pydantic schemas
-└── config_manager.py # Framework prompts
+├── config_manager.py # Framework prompts
+└── frontend_validator.py # Frontend quality validation (v0.3.0)
 ```
 
 ### Adaptive Agent Dependencies
 
 ```text
-adaptive_agent.py (61 KB)
+adaptive_agent.py (67 KB)
 ├── agent_manager.py # LLM chat interface
 ├── file_system_manager.py # WRITE_FILE, DELETE_FILE
 ├── command_executor.py # RUN_COMMAND
@@ -428,10 +511,48 @@ file_system_manager.py (58 KB)
 ### Code Intelligence Service Dependencies
 
 ```text
-code_intelligence_service.py (106 KB)
+code_intelligence_service.py (109 KB)
 ├── ast (Python built-in) # AST parsing
 ├── project_models.py # CodeContext schema
 └── (no external deps) # Zero-token analysis
+```
+
+### Frontend Validator Dependencies (v0.3.0)
+
+```text
+frontend_validator.py (6.7 KB)
+├── parsers/html_parser.py # HTML validation
+├── parsers/css_parser.py # CSS validation
+├── parsers/vanilla_js_parser.py # JS validation
+├── analyzers/accessibility_analyzer.py # WCAG mapping
+├── analyzers/performance_analyzer.py # Lighthouse checks
+├── validators/js_html_validator.py # Cross-file integrity
+└── project_models.py # FrontendValidationIssue schema
+```
+
+### HTML/CSS/JS Parser Dependencies
+
+```text
+parsers/ (37 KB total)
+├── html_parser.py (13 KB)
+│ ├── BeautifulSoup4 # HTML parsing
+│ └── project_models.py # HTMLFileDetails
+├── css_parser.py (11 KB)
+│ ├── re (regex) # Selector extraction
+│ └── project_models.py # CSSFileDetails
+└── vanilla_js_parser.py (12 KB)
+├── esprima # JavaScript AST
+└── project_models.py # VanillaJSFileDetails
+```
+
+### Analyzer Dependencies
+
+```text
+analyzers/ (11 KB total)
+├── accessibility_analyzer.py (4 KB)
+│ └── project_models.py # FrontendValidationIssue
+└── performance_analyzer.py (7 KB)
+└── project_models.py # FrontendValidationIssue
 ```
 
 ### Command Executor Dependencies
@@ -450,6 +571,18 @@ memory_manager.py (49 KB)
 ├── project_models.py # MemorySchema
 ├── hashlib # SHA-256 verification
 └── pathlib # File I/O
+```
+
+### Frontend Validator Dependencies (NEW in v0.3.0)
+
+```text
+frontend_validator.py (6.7 KB)
+├── parsers/html_parser.py # HTML structure analysis
+├── parsers/css_parser.py # CSS analysis
+├── parsers/vanilla_js_parser.py # JavaScript analysis
+├── analyzers/accessibility_analyzer.py # WCAG 2.1 compliance
+├── analyzers/performance_analyzer.py # Core Web Vitals
+└── validators/js_html_validator.py # Cross-file integrity
 ```
 
 ---
@@ -475,8 +608,9 @@ Follow this sequence to understand VebGen's architecture from high-level concept
 4. **adaptive_agent.md** - CASE execution loop, 9 actions, content management
 5. **agent_manager.md** - LLM integration, provider switching
 6. **code_intelligence_service.md** - AST parsing magic (zero tokens!)
+7. **🆕 frontend_validator.md** - WCAG 2.1 validation orchestration (v0.3.0)
 
-**Time**: 60-90 minutes | **Outcome**: Understand task execution and LLM communication
+**Time**: 90-120 minutes | **Outcome**: Understand task execution, LLM communication, and frontend quality enforcement
 
 ---
 
@@ -530,6 +664,9 @@ Follow this sequence to understand VebGen's architecture from high-level concept
 #### "I want to understand state management"
 → Read: **memory_manager.md** + **project_models.md** + **workflow_manager.md** (state machine section)
 
+#### "I want to understand frontend validation (WCAG/accessibility)"
+→ Read: **frontend_validator.md** + **html_parser.md** + **css_parser.md** + **analyzers.md**
+
 ---
 
 ## 📊 Key Metrics
@@ -538,12 +675,14 @@ Follow this sequence to understand VebGen's architecture from high-level concept
 
 | Metric | Value |
 |--------|-------|
-| **Total Python Code** | ~800 KB |
-| **Total Documentation** | 850+ KB |
-| **Core Components** | 27 files |
-| **Unit Tests** | 309 passing tests (99.7% success rate) |
-| **Test Modules** | 20 test files covering all components |
-| **Django Constructs Supported** | 95+ |
+| **Total Python Code** | ~900 KB (+100 KB frontend validation) |
+| **Total Documentation** | 1,000+ KB (+150 KB for v0.3.0) |
+| **Core Components** | 34 files (+7 frontend validation) |
+| **Unit Tests** | 356 passing tests (+47 frontend tests) |
+| **Test Modules** | 28 test files (+8 frontend test modules) |
+| **Django Constructs Supported** | 95+ (backend) + 100+ (frontend rules) |
+| **WCAG Criteria Covered** | 12+ (v0.3.0 NEW) |
+| **Frontend File Types Analyzed** | HTML, CSS, JavaScript (v0.3.0 NEW) |
 | **Supported Models** | 120+ |
 | **LLM Providers** | 5 |
 | **Framework Plugins** | 4 (Django, Flask, React, Node) |
@@ -601,8 +740,8 @@ All component documentation should include:
 
 <div align="center">
 
-**VebGen Architecture** - 850+ KB of technical documentation  
-**Built with ❤️ by the VebGen Team**
+**VebGen Architecture** - 900+ KB of technical documentation  
+**Built with ❤️ by Ramesh Ravada**
 
 🏠 Back to README | 📚 Component Docs | 🚀 Quick Start
 

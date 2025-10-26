@@ -1,4 +1,4 @@
-# src/core/hf_client.py
+# backend/src/core/hf_client.py
 import logging
 import requests
 import requests.exceptions # Import specific exceptions

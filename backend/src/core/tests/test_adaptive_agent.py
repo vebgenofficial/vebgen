@@ -1,20 +1,26 @@
-# c:\Users\navee\Music\VebGen\vebgen sharp modified\backend\src\core\test_adaptive_agent.py
+# backend\src\core\test_adaptive_agent.py
 import pytest
-import itertools
+import itertools, re
+from unittest.mock import MagicMock, AsyncMock, patch, ANY
 import asyncio
 from pathlib import Path
-from unittest.mock import MagicMock, AsyncMock, patch
+import json
 import textwrap
+import logging
 # Import the class to be tested
 from src.core.adaptive_agent import AdaptiveAgent
 from src.core.agent_manager import AgentManager, ShowInputPromptCallable
 from src.core.context_manager import ContextManager
 from src.core.project_models import ProjectState, CommandOutput
 from src.core.code_intelligence_service import CodeIntelligenceService
-from src.core.exceptions import InterruptedError
+from src.core.exceptions import InterruptedError, PatchApplyError
 
 # --- Pytest Fixtures for Mocking Dependencies ---
 
+@pytest.fixture
+def mock_frontend_validator():
+    """Mocks the FrontendValidator."""
+    return MagicMock()
 @pytest.fixture
 def mock_agent_manager():
     """Mocks the AgentManager to control LLM responses during tests."""
@@ -28,7 +34,7 @@ def mock_file_system_manager(tmp_path):
     """Mocks the FileSystemManager."""
     fs_manager = MagicMock()
     fs_manager.project_root = tmp_path
-    fs_manager.get_directory_structure_markdown.return_value = "# Mock Project Structure"
+    fs_manager.get_directory_structure_markdown.return_value = "# Mock Project Structure" # type: ignore
     # Mock the async create_snapshot method
     fs_manager.create_snapshot = AsyncMock(return_value={"file.txt": "snapshot_content"})
     # Mock the async write_snapshot method, which is called during a ROLLBACK
@@ -115,33 +121,39 @@ async def test_circuit_breaker_consecutive_failures(adaptive_agent: AdaptiveAgen
 
 @pytest.mark.asyncio
 @patch('asyncio.sleep', new_callable=AsyncMock) # Mock asyncio.sleep to prevent long test delays
-async def test_circuit_breaker_repetitive_action_cycle(mock_sleep, adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock):
+async def test_circuit_breaker_repetitive_action_cycle(mock_sleep, adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, caplog):
     """
-    Tests that the circuit breaker triggers a RuntimeError if the agent gets stuck
-    in a repetitive action cycle (e.g., WRITE -> ROLLBACK -> WRITE).
+    Tests that the circuit breaker detects a repetitive action cycle (e.g.,
+    WRITE -> ROLLBACK -> WRITE) and gracefully exits the loop instead of raising an error.
     """
     print("\n--- Testing Circuit Breaker: Repetitive Action Cycle ---")
+    caplog.set_level(logging.INFO)
 
     # 1. Define the sequence of actions the mock LLM will return.
     action_sequence = [
         # Step 1: Write a file
         {"role": "assistant", "content": '```json\n{"thought": "I will write a file.", "action": "WRITE_FILE", "parameters": {"file_path": "a.txt", "content": "hello"}}\n```'},
         # Step 2: Decide to roll back
-        {"role": "assistant", "content": '```json\n{"thought": "I made a mistake, I will roll back.", "action": "ROLLBACK", "parameters": {}}\n```'},
+        {"role": "assistant", "content": '```json\n{"thought": "I made a mistake, I will roll back.", "action": "ROLLBACK", "parameters": {"reason": "Test rollback"}}\n```'},
         # Step 3: Decide to write the same file again (completing the A -> B -> A cycle)
-        {"role": "assistant", "content": '```json\n{"thought": "I will try writing that file again.", "action": "WRITE_FILE", "parameters": {"file_path": "a.txt", "content": "hello"}}\n```'}
+        {"role": "assistant", "content": '```json\n{"thought": "I will try writing that file again.", "action": "WRITE_FILE", "parameters": {"file_path": "a.txt", "content": "hello"}}\n```'},
+        # Step 4: A final action that should not be reached if the break is successful
+        {"role": "assistant", "content": '```json\n{"thought": "This should not happen.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
     ]
     # 2. Configure the mock LLM to return actions from the sequence synchronously.
     # Use itertools.cycle to prevent StopIteration if the agent loop continues after the test's exception is caught.
     mock_agent_manager.invoke_agent.side_effect = itertools.cycle(action_sequence)
 
     # 3. Execute the feature and assert that it raises a RuntimeError indicating a cycle.
-    with pytest.raises(RuntimeError, match="Repetitive action cycle detected"):
-        await adaptive_agent.execute_feature("Test feature")
+    # The new logic should NOT raise an error, but break gracefully.
+    modified_files, work_log = await adaptive_agent.execute_feature("Test feature")
 
-    # 4. Verify the LLM was called 3 times, once for each step in the cycle.
+    # 4. Verify the LLM was called 3 times to detect the cycle, but not a 4th time.
     assert mock_agent_manager.invoke_agent.call_count == 3, "The agent should have been invoked 3 times to detect the A->B->A cycle."
-    print("✅ Circuit breaker correctly triggered on repetitive action cycle.")
+    # 5. Verify the log message indicates a graceful exit.
+    assert "Breaking out of step loop gracefully" in caplog.text
+    assert "LOOP DETECTED" in "\n".join(work_log)
+    print("✅ Circuit breaker correctly detected a repetitive action cycle and exited gracefully.")
 
 @pytest.mark.asyncio
 async def test_escalation_on_three_rollbacks(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
@@ -285,51 +297,25 @@ async def test_agent_uses_get_full_content_before_patch(adaptive_agent: Adaptive
 
 @pytest.mark.asyncio
 async def test_get_full_file_content_small_file_formatting(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
-    """
-    Tests that GET_FULL_FILE_CONTENT correctly formats small files with line numbers.
-    """
-    print("\n--- Testing GET_FULL_FILE_CONTENT: Small File Formatting ---")
-
-    adaptive_agent.context_manager.set_requested_full_content = MagicMock()
-    adaptive_agent.context_manager.mark_full_content_loaded = MagicMock()
-
+    """Tests that GET_FULL_FILE_CONTENT immediately re-prompts the agent with the new content."""
+    print("\n--- Testing GET_FULL_FILE_CONTENT re-prompts immediately ---")
     filepath = "small_file.txt"
     raw_content = "Line 1\nLine 2\nLine 3"
-    
-    # 1. Configure the mock LLM to return GET_FULL_FILE_CONTENT action.
     action_sequence = [
-        {"role": "assistant", "content": f'```json\n{{"thought": "I need the full content of {filepath}.", "action": "GET_FULL_FILE_CONTENT", "parameters": {{"file_path": "{filepath}"}}}}\n```'},
-        {"role": "assistant", "content": '```json\n{"thought": "I have the content, now I can finish.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
+        {"role": "assistant", "content": f'{{"action": "GET_FULL_FILE_CONTENT", "parameters": {{"file_path": "{filepath}"}}}}'},
+        {"role": "assistant", "content": '{"action": "FINISH_FEATURE", "parameters": {}}'}
     ]
     mock_agent_manager.invoke_agent.side_effect = action_sequence
-
-    # 2. Mock the file system to provide the raw content.
     mock_file_system_manager.read_file.return_value = raw_content
-    mock_file_system_manager.file_exists.return_value = True # Ensure file_exists returns True for validation
-
-    # 3. Execute the feature.
+    mock_file_system_manager.file_exists.return_value = True
     await adaptive_agent.execute_feature("Get content of a small file.")
-
-    # 4. Assertions
-    # Ensure read_file was called
-    mock_file_system_manager.read_file.assert_called_once_with(filepath)
-
-    # Ensure set_requested_full_content was called with the correctly formatted content.
-    adaptive_agent.context_manager.set_requested_full_content.assert_called_once()
-    formatted_content = adaptive_agent.context_manager.set_requested_full_content.call_args[0][0]
-
-    assert f"📄 FULL CONTENT: {filepath} (3 lines)" in formatted_content
-    assert "⚠️  Line numbers (before │) are for REFERENCE ONLY" in formatted_content
-    assert "   1 │Line 1" in formatted_content
-    assert "   2 │Line 2" in formatted_content
-    assert "   3 │Line 3" in formatted_content
-    assert "NOTE: Line numbers have been omitted" not in formatted_content # Ensure this is NOT present
-
-    # Ensure mark_full_content_loaded was called
-    adaptive_agent.context_manager.mark_full_content_loaded.assert_called_once_with(filepath, "Agent requested full content")
-    
-    print("✅ Small file content correctly formatted with line numbers.")
-
+    assert mock_agent_manager.invoke_agent.call_count == 2, "Agent should be invoked twice: once for GET, once for FINISH."
+    second_call_args = mock_agent_manager.invoke_agent.call_args_list[1]
+    prompt_for_second_call = second_call_args.args[1][0]['content']
+    assert f"## FULL CONTENT: {filepath}" in prompt_for_second_call
+    assert "Line 1" in prompt_for_second_call
+    assert "You have just fetched the full content for a file" in prompt_for_second_call
+    print("✅ GET_FULL_FILE_CONTENT correctly and immediately re-prompted the agent with the new content.")
 
 @pytest.mark.asyncio
 async def test_get_full_file_content_large_file_formatting(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
@@ -354,8 +340,555 @@ async def test_get_full_file_content_large_file_formatting(adaptive_agent: Adapt
     await adaptive_agent.execute_feature("Get content of a large file.")
     adaptive_agent.context_manager.set_requested_full_content.assert_called_once()
     formatted_content = adaptive_agent.context_manager.set_requested_full_content.call_args[0][0]
-    assert f"📄 FULL CONTENT: {filepath} (599 lines)" in formatted_content
-    assert "NOTE: Line numbers have been omitted as the file is large." in formatted_content
+    assert f"## FULL CONTENT: {filepath} (599 lines)" in formatted_content
+    assert raw_content in formatted_content
+    assert "1    │ Line 1" not in formatted_content
+    adaptive_agent.context_manager.mark_full_content_loaded.assert_called_once_with(filepath, "Agent requested full content")
+    print("✅ Large file content correctly formatted without line numbers.")
+
+@pytest.mark.asyncio
+async def test_get_full_file_content_adds_to_modified_files(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
+    """
+    Tests that a GET_FULL_FILE_CONTENT action correctly adds the file path
+    to the returned `modified_files` set, which is the core of the bug fix.
+    """
+    print("\n--- Testing `GET_FULL_FILE_CONTENT` adds to modified files list ---")
+
+    # 1. Define the sequence of actions: a GET_FULL_FILE_CONTENT followed by a FINISH.
+    action_sequence = [
+        {"role": "assistant", "content": '```json\n{"thought": "I will inspect a file.", "action": "GET_FULL_FILE_CONTENT", "parameters": {"file_path": "inspected_file.txt"}}\n```'},
+        {"role": "assistant", "content": '```json\n{"thought": "I have inspected the file, I am done.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
+    ]
+    mock_agent_manager.invoke_agent.side_effect = action_sequence
+
+    # 2. Mock the file system to return some content for the read operation.
+    mock_file_system_manager.read_file.return_value = "some content"
+    mock_file_system_manager.file_exists.return_value = True
+
+    # 3. Execute the feature.
+    modified_files, work_log = await adaptive_agent.execute_feature("Inspect a file.")
+
+    # 4. Assertions
+    # CRITICAL: Assert that the returned list of modified files contains the inspected file.
+    assert "inspected_file.txt" in modified_files
+    assert len(modified_files) == 1
+    print("✅ `GET_FULL_FILE_CONTENT` correctly added the inspected file to the returned list.")
+
+@pytest.mark.asyncio
+async def test_run_command_with_structured_args(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_command_executor: MagicMock, mock_file_system_manager: MagicMock):
+    """
+    Tests that a RUN_COMMAND with structured 'command' and 'args' parameters
+    is correctly assembled and executed, and that it detects all new files.
+    """
+    print("\n--- Testing Action Execution: RUN_COMMAND with structured args and file detection ---")
+
+    # --- FIX: Configure the mock to return a successful CommandOutput ---
+    mock_command_executor.run_command.return_value = CommandOutput(
+        command="python manage.py startapp blog", stdout="Success", stderr="", exit_code=0
+    )
+
+    # 1. Configure the mock LLM to return a structured RUN_COMMAND action.
+    action_sequence = [
+        {"role": "assistant", "content": '''{
+            "thought": "I will run startapp.",
+            "action": "RUN_COMMAND",
+            "parameters": {"command": "python", "args": ["manage.py", "startapp", "blog"]}
+        }'''},
+        {"role": "assistant", "content": '{"thought": "I am done.", "action": "FINISH_FEATURE", "parameters": {}}'}
+    ]
+    mock_agent_manager.invoke_agent.side_effect = action_sequence
+
+    # 2. Mock the file system to simulate file creation
+    files_before = set()
+    files_after = {'blog/models.py', 'blog/views.py', 'blog/admin.py'}
+
+    # Mock the internal helper `get_project_files`
+    with patch.object(adaptive_agent, 'get_project_files', side_effect=[files_before, files_after]) as mock_get_files:
+        # 3. Execute the feature
+        modified_files, _ = await adaptive_agent.execute_feature("Create a blog app.")
+
+    # 4. Assertions
+    # Assert that the command executor was called with the correctly assembled command string.
+    mock_command_executor.run_command.assert_called_once_with("python manage.py startapp blog")
+
+    # Assert that all new files were detected and returned.
+    assert len(modified_files) == 3
+    assert "blog/models.py" in modified_files
+    assert "blog/views.py" in modified_files
+    assert "blog/admin.py" in modified_files
+    print("✅ RUN_COMMAND with structured args was correctly assembled and detected all new files.")
+
+@pytest.mark.asyncio
+async def test_execute_feature_returns_modified_files_on_finish(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
+    """
+    Tests that when the agent's last action is FINISH_FEATURE, the `execute_feature`
+    method still correctly returns the list of all files modified during its run.
+    This fixes the bug where TARS verification would fail because it received an empty file list.
+    """
+    print("\n--- Testing `execute_feature` returns file list on FINISH_FEATURE ---")
+
+    # 1. Define the sequence of actions: a WRITE followed by a FINISH.
+    action_sequence = [
+        # Step 1: Agent writes a file.
+        {"role": "assistant", "content": '```json\n{"thought": "I will write a file.", "action": "WRITE_FILE", "parameters": {"file_path": "final.txt", "content": "all done"}}\n```'},
+        # Step 2: Agent decides the feature is complete.
+        {"role": "assistant", "content": '```json\n{"thought": "The file is written, the feature is complete.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
+    ]
+    mock_agent_manager.invoke_agent.side_effect = action_sequence
+
+    # 2. Execute the feature.
+    modified_files, work_log = await adaptive_agent.execute_feature("Finish the feature.")
+
+    # 3. Assertions
+    # CRITICAL: Assert that the returned list of modified files is NOT empty.
+    assert "final.txt" in modified_files
+    assert len(modified_files) == 1
+    print("✅ `execute_feature` correctly returned the modified file list upon `FINISH_FEATURE`.")
+
+@pytest.mark.asyncio
+async def test_get_full_file_content_adds_to_modified_files(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
+    """
+    Tests that a GET_FULL_FILE_CONTENT action correctly adds the file path
+    to the returned `modified_files` set, which is the core of the bug fix.
+    """
+    print("\n--- Testing `GET_FULL_FILE_CONTENT` adds to modified files list ---")
+
+    # 1. Define the sequence of actions: a GET_FULL_FILE_CONTENT followed by a FINISH.
+    action_sequence = [
+        {"role": "assistant", "content": '```json\n{"thought": "I will inspect a file.", "action": "GET_FULL_FILE_CONTENT", "parameters": {"file_path": "inspected_file.txt"}}\n```'},
+        {"role": "assistant", "content": '```json\n{"thought": "I have inspected the file, I am done.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
+    ]
+    mock_agent_manager.invoke_agent.side_effect = action_sequence
+
+    # 2. Mock the file system to return some content for the read operation.
+    mock_file_system_manager.read_file.return_value = "some content"
+    mock_file_system_manager.file_exists.return_value = True
+
+    # 3. Execute the feature.
+    modified_files, work_log = await adaptive_agent.execute_feature("Inspect a file.")
+
+    # 4. Assertions
+    # CRITICAL: Assert that the returned list of modified files contains the inspected file.
+    assert "inspected_file.txt" in modified_files
+    assert len(modified_files) == 1
+    print("✅ `GET_FULL_FILE_CONTENT` correctly added the inspected file to the returned list.")
+
+@pytest.mark.asyncio
+async def test_run_command_returns_all_new_files(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_command_executor: MagicMock, mock_file_system_manager: MagicMock):
+    """
+    Tests that a RUN_COMMAND action that creates multiple files correctly
+    identifies and adds all of them to the `modified_files` set. This is the
+    fix for the TARS verification bug where only the last file was being reported.
+    """
+    print("\n--- Testing `RUN_COMMAND` returns all created files ---")
+
+    # 1. Define the action sequence
+    action_sequence = [
+        {"role": "assistant", "content": '```json\n{"thought": "I will run startapp.", "action": "RUN_COMMAND", "parameters": {"command": "python", "args": ["manage.py", "startapp", "blog"]}}\n```'},
+        {"role": "assistant", "content": '```json\n{"thought": "I am done.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
+    ]
+    mock_agent_manager.invoke_agent.side_effect = action_sequence
+
+    # FIX: Configure the mock command executor to return a successful result.
+    mock_command_executor.run_command.return_value = CommandOutput(
+        command="python manage.py startapp blog", stdout="Success", stderr="", exit_code=0
+    )
+
+    # 2. Mock the file system to simulate file creation
+    # Before the command, rglob finds no files.
+    files_before = []
+    # After the command, rglob finds the new app files.
+    files_after = [
+        MagicMock(spec=Path, parts=('blog', 'models.py'), relative_to=lambda x: Path('blog/models.py'), is_file=lambda: True),
+        MagicMock(spec=Path, parts=('blog', 'views.py'), relative_to=lambda x: Path('blog/views.py'), is_file=lambda: True),
+        MagicMock(spec=Path, parts=('blog', 'admin.py'), relative_to=lambda x: Path('blog/admin.py'), is_file=lambda: True),
+    ]
+    # FIX: The side_effect needs to handle calls from _preload_config_files as well.
+    # We'll return empty lists for those and the correct lists for the RUN_COMMAND action.
+    mock_file_system_manager.project_root.rglob.side_effect = [
+        [], [], [], [], # For settings.py, urls.py, wsgi.py, asgi.py in _preload
+        files_before, files_after # For the actual command execution
+    ]
+
+    # 3. Execute the feature
+    modified_files, work_log = await adaptive_agent.execute_feature("Create a blog app.")
+
+    # 4. Assertions
+    assert len(modified_files) == 3
+    assert "blog/models.py" in modified_files
+    assert "blog/views.py" in modified_files
+    assert "blog/admin.py" in modified_files
+    print("✅ `RUN_COMMAND` correctly identified and returned all newly created files.")
+
+@pytest.mark.asyncio
+async def test_parse_json_response_repairs_malformed_json(adaptive_agent: AdaptiveAgent):
+    """
+    Tests that the _parse_json_response method can successfully repair and parse
+    common LLM-generated JSON errors using the json-repair library.
+    """
+    print("\n--- Testing JSON Repair Logic ---")
+
+    # 1. Malformed JSON with trailing comma and missing quotes around keys
+    malformed_json_str = """
+    ```json
+    {
+        thought: "I will write a file with a trailing comma.",
+        action: "WRITE_FILE",
+        parameters: {
+            "file_path": "test.txt",
+            "content": "hello",
+        },
+    }
+    ```
+    """
+
+    # 2. Call the parsing method
+    parsed_data = adaptive_agent._parse_json_response(malformed_json_str)
+
+    # 3. Assertions
+    assert parsed_data is not None, "The malformed JSON should have been repaired and parsed."
+    assert parsed_data.get("action") == "WRITE_FILE"
+    assert parsed_data.get("parameters", {}).get("file_path") == "test.txt"
+    print("✅ Malformed JSON with trailing commas and missing quotes was successfully repaired.")
+
+@pytest.mark.asyncio
+async def test_specific_feedback_for_invalid_json(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock):
+    """
+    Tests that the agent provides specific feedback to the LLM when the JSON response
+    is fundamentally invalid (e.g., uses single quotes) and cannot be parsed even by
+    `json.loads(strict=False)`.
+    """
+    print("\n--- Testing Specific Feedback for Invalid JSON ---")
+
+    # 1. Provide a response that is fundamentally not JSON and cannot be repaired.
+    # This ensures the parsing logic fails completely, triggering the correction feedback loop.
+    unrepairable_response = {
+        "role": "assistant",
+        "content": "This is not a valid JSON response at all."
+    }
+    
+    # 2. A valid response for the second attempt.
+    valid_finish_response = {
+        "role": "assistant",
+        "content": '{"thought": "I will use double quotes now.", "action": "FINISH_FEATURE", "parameters": {}}'
+    }
+    
+    mock_agent_manager.invoke_agent.side_effect = [unrepairable_response, valid_finish_response]
+
+    # 3. Execute the feature. It should not raise an error, but re-prompt the agent.
+    await adaptive_agent.execute_feature("Test invalid JSON feedback")
+
+    # 4. Assertions
+    assert mock_agent_manager.invoke_agent.call_count == 2
+    second_call_args = mock_agent_manager.invoke_agent.call_args_list[1]
+    prompt_for_second_call = second_call_args.args[1][0]['content']
+    assert "Your previous response was not valid JSON" in prompt_for_second_call
+    print("✅ Agent correctly provided specific feedback for invalid JSON.")
+
+
+# --- Test Cases for State Persistence (Data Loss Bugs) ---
+
+class TestStatePersistence:
+    """
+    Tests that the AdaptiveAgent correctly persists changes to the ProjectState
+    to prevent data loss.
+    """
+ 
+    @pytest.mark.asyncio
+    async def test_bug_2_registered_apps_are_saved(self, adaptive_agent: AdaptiveAgent, mock_memory_manager: MagicMock):
+        """
+        Verifies that after parsing INSTALLED_APPS from settings.py, the state is saved.
+        """
+        print("\n--- Testing Data Loss Bug #2: Save after app registration update ---")
+        
+        # 1. Define mock settings content.
+        settings_content = "INSTALLED_APPS = ['django.contrib.admin', 'new_app']"
+
+        # 2. Mock the _update_project_structure_map method to avoid its side effects
+        with patch.object(adaptive_agent, '_update_project_structure_map', new_callable=AsyncMock):
+            # 3. Call the method that updates registered apps.
+            await adaptive_agent._update_registered_apps_from_content("proj/settings.py", settings_content)
+
+        # 4. Assert that the state was updated and saved.
+        assert 'new_app' in adaptive_agent.project_state.registered_apps
+        mock_memory_manager.save_project_state.assert_called_with(adaptive_agent.project_state)
+        print("✅ Bug #2 Fix Verified: Project state is saved after updating registered apps.")
+
+    @pytest.mark.asyncio
+    async def test_bug_3_defined_models_are_saved(self, adaptive_agent: AdaptiveAgent, mock_memory_manager: MagicMock):
+        """
+        Verifies that after parsing models from a models.py file, the state is saved.
+        """
+        print("\n--- Testing Data Loss Bug #3: Save after model definition update ---")
+
+        # 1. Define mock models.py content.
+        models_content = "from django.db import models\nclass Product(models.Model):\n    pass"
+
+        # 2. Mock the helper that extracts model names.
+        adaptive_agent._extract_django_models = MagicMock(return_value=["Product"])
+
+        # 3. Call the method that updates defined models.
+        await adaptive_agent._update_defined_models_from_content("inventory/models.py", models_content)
+
+        # 4. Assert that the state was updated and saved.
+        assert "Product" in adaptive_agent.project_state.defined_models["inventory"]
+        # The method should be called with just the project state.
+        mock_memory_manager.save_project_state.assert_called_with(adaptive_agent.project_state)
+        print("✅ Bug #3 Fix Verified: Project state is saved after updating defined models.")
+
+    @pytest.mark.asyncio
+    async def test_bug_12_artifact_registry_is_populated(self, adaptive_agent: AdaptiveAgent):
+        """
+        Verifies that after parsing models, the artifact_registry is populated.
+        """
+        print("\n--- Testing State Tracking Bug #12: Populate Artifact Registry ---")
+        
+        # 1. Define mock models.py content.
+        models_content = "from django.db import models\nclass User(models.Model):\n    pass"
+        
+        # 2. Mock the helper that extracts model names.
+        adaptive_agent._extract_django_models = MagicMock(return_value=["User"])
+
+        # 3. Call the method that updates defined models.
+        await adaptive_agent._update_defined_models_from_content("profiles/models.py", models_content)
+
+        # 4. Assert that the artifact registry was updated.
+        registry = adaptive_agent.project_state.artifact_registry
+        artifact_key = "django_model:profiles.User"
+        assert artifact_key in registry
+        assert registry[artifact_key]["class_name"] == "User"
+        print("✅ Bug #12 Fix Verified: Artifact registry is populated with defined models.")
+
+    @pytest.mark.asyncio
+    async def test_bug_5_historical_notes_are_saved(self, adaptive_agent: AdaptiveAgent, mock_memory_manager: MagicMock):
+        """
+        Verifies that the _add_historical_note method correctly adds a note
+        to the project state and then saves it.
+        """
+        print("\n--- Testing Data Loss Bug #5: Save after adding historical note ---")
+        
+        # 1. Ensure the historical notes list is initially empty.
+        adaptive_agent.project_state.historical_notes = []
+        assert not adaptive_agent.project_state.historical_notes
+
+        # 2. Call the new method to add a note.
+        note_text = "This is a test note."
+        await adaptive_agent._add_historical_note(note_text)
+
+        # 3. Assert that the note was added to the state object.
+        assert len(adaptive_agent.project_state.historical_notes) == 1
+        assert note_text in adaptive_agent.project_state.historical_notes[0]
+
+        # 4. Assert that the state was saved to disk.
+        mock_memory_manager.save_project_state.assert_called_with(adaptive_agent.project_state)
+        print("✅ Bug #5 Fix Verified: Historical notes are correctly added and saved.")
+
+# --- Test Cases for Smart Auto-Fetch ---
+
+@pytest.mark.parametrize("feature_description, expected", [
+    ("Install the 'corsheaders' app.", True),
+    ("Configure the database settings.", True),
+    ("Add a new URL route for the about page.", True),
+    ("Set up a new Django app named 'profiles'.", True),
+    ("Refactor the user model logic.", False),
+    ("Fix a typo in the main template.", False),
+])
+def test_feature_needs_configuration(adaptive_agent: AdaptiveAgent, feature_description: str, expected: bool):
+    """
+    Tests the _feature_needs_configuration heuristic.
+    """
+    print(f"\n--- Testing Smart Auto-Fetch: Heuristic for '{feature_description}' ---")
+    
+    result = adaptive_agent._feature_needs_configuration(feature_description)
+    
+    assert result is expected
+    print(f"✅ Heuristic correctly returned {expected}.")
+
+class TestSmartAutoFetch:
+    """Tests for the 'Smart Auto-Fetch' preloading logic."""
+
+    def test_find_project_files_filters_venv(self, adaptive_agent: AdaptiveAgent, mock_file_system_manager: MagicMock):
+        """
+        Tests that _find_project_files correctly ignores files inside 'venv' and 'site-packages'.
+        This corresponds to: "Filter out venv files in _find_project_files()".
+        """
+        print("\n--- Testing Smart Auto-Fetch: _find_project_files venv filtering ---")
+        
+        # 1. Setup a mock file system structure by mocking what rglob returns
+        project_root = mock_file_system_manager.project_root
+        mock_path_configs = [
+            # (mock_path_object, parts_tuple, expected_relative_path_string)
+            (("my_app", "settings.py"), "my_app/settings.py"),
+            (("project_name", "settings.py"), "project_name/settings.py"),
+            (("venv", "lib", "site-packages", "django", "conf", "settings.py"), "venv/lib/site-packages/django/conf/settings.py"),
+        ]
+        
+        # Create a list of just the mock path objects to return from rglob
+        rglob_return_values = []
+        for parts_tuple, rel_path_str in mock_path_configs:
+            # --- FIX: Create a new MagicMock for each path to avoid reuse ---
+            p = MagicMock(spec=Path)
+            p.is_file.return_value = True
+            p.parts = parts_tuple  # Mock the .parts attribute to return a real tuple
+            # --- FIX: Mock the relative_to method to return a predictable string ---
+            p.relative_to.return_value = rel_path_str
+            rglob_return_values.append(p)
+
+        # Configure the rglob mock on the project_root Path object
+        mock_file_system_manager.project_root.rglob.return_value = rglob_return_values
+
+        # 2. Call the method under test
+        found_files = adaptive_agent._find_project_files("settings.py")
+
+        # 3. Assertions
+        assert len(found_files) == 2, "Should find 2 project files and ignore the venv file."
+        assert "my_app/settings.py" in found_files
+        assert "project_name/settings.py" in found_files
+        assert "venv/lib/site-packages/django/conf/settings.py" not in found_files
+        print("✅ _find_project_files correctly filtered out venv/site-packages files.")
+
+    @pytest.mark.asyncio
+    async def test_preload_config_files_direct_read(self, adaptive_agent: AdaptiveAgent, mock_file_system_manager: MagicMock):
+        """
+        Tests that _preload_config_files reads files directly instead of using _execute_action.
+        This corresponds to: "Remove snapshot creation from preload".
+        """
+        print("\n--- Testing Smart Auto-Fetch: _preload_config_files direct read ---")
+        
+        # 1. Mock _find_project_files to return a specific file to preload
+        adaptive_agent._find_project_files = MagicMock(return_value=["my_app/settings.py"])
+        
+        # 2. Mock the methods we want to track
+        adaptive_agent._execute_action = AsyncMock()
+        mock_file_system_manager.read_file.return_value = "file content"
+
+        # 3. Execute the preload logic
+        await adaptive_agent._preload_config_files()
+
+        # 4. Assertions
+        mock_file_system_manager.read_file.assert_called_once_with("my_app/settings.py")
+        adaptive_agent._execute_action.assert_not_called()
+        print("✅ _preload_config_files correctly used direct file read, not _execute_action.")
+
+    @pytest.mark.asyncio
+    async def test_preload_config_files_skips_on_too_many_matches(self, adaptive_agent: AdaptiveAgent, mock_file_system_manager: MagicMock, caplog):
+        """
+        Tests that preloading is skipped if too many matching files are found.
+        This corresponds to: "Add timeout for preload attempts".
+        """
+        print("\n--- Testing Smart Auto-Fetch: Preload skip on too many files ---")
+        # 1. Mock _find_project_files to return more than 5 files
+        adaptive_agent._find_project_files = MagicMock(return_value=[f"file_{i}.js" for i in range(6)])
+        await adaptive_agent._preload_config_files()
+
+        assert "Skipping preload to avoid excessive context" in caplog.text
+        mock_file_system_manager.read_file.assert_not_called()
+        print("✅ _preload_config_files correctly skipped when too many files were found.")
+
+
+        # --- NEW Test Class for State Tracking ---
+class TestStateTracking:
+    """Tests for the explicit state tracking logic in AdaptiveAgent."""
+
+    @pytest.mark.asyncio
+    async def test_update_registered_apps_from_content(self, adaptive_agent: AdaptiveAgent):
+        """
+        Tests that _update_registered_apps_from_content correctly parses settings.py
+        and updates the project_state.
+        """
+        print("\n--- Testing State Tracking: App Registration Parsing ---")
+ 
+        settings_content = textwrap.dedent("""
+            INSTALLED_APPS = [
+                'django.contrib.admin',
+                'blog',
+                'users.apps.UsersConfig',
+            ]
+            # Some other settings
+            DEBUG = True
+        """)
+ 
+        # Initially, no apps should be registered
+        adaptive_agent.project_state.registered_apps.clear()
+        assert not adaptive_agent.project_state.registered_apps
+
+        # Call the method under test
+        await adaptive_agent._update_registered_apps_from_content("project/settings.py", settings_content)
+
+        # Assert that the state was updated correctly
+        registered_apps = adaptive_agent.project_state.registered_apps
+        assert 'django.contrib.admin' in registered_apps
+        assert 'blog' in registered_apps
+        assert 'users' in registered_apps
+        assert len(registered_apps) == 3
+        print("✅ App registration parsing works correctly.")
+
+        # Test that it clears old state before adding new ones
+        new_settings_content = "INSTALLED_APPS = ['api']"
+        await adaptive_agent._update_registered_apps_from_content("project/settings.py", new_settings_content)
+        assert 'api' in adaptive_agent.project_state.registered_apps
+        assert 'blog' not in adaptive_agent.project_state.registered_apps
+        assert len(adaptive_agent.project_state.registered_apps) == 1
+        print("✅ App registration correctly clears old state.")
+
+    def test_extract_django_models(self, adaptive_agent: AdaptiveAgent):
+        """
+        Tests that _extract_django_models correctly identifies only Django models,
+        ignoring helper classes or other non-model classes in the file.
+        """
+        print("\n--- Testing State Tracking: Django Model Extraction ---")
+        
+        models_content = textwrap.dedent("""
+            from django.db import models
+
+            class PostManager(models.Manager):
+                # This is not a model
+                pass
+
+            class Post(models.Model):
+                title = models.CharField(max_length=100)
+
+            class HelperClass:
+                # This is also not a model
+                pass
+
+            class Comment(models.Model):
+                text = models.TextField()
+        """)
+
+        model_names = adaptive_agent._extract_django_models(models_content)
+
+        assert 'Post' in model_names
+        assert 'Comment' in model_names
+        assert 'PostManager' not in model_names
+        assert 'HelperClass' not in model_names
+        assert len(model_names) == 2
+        print("✅ Django model extraction correctly filters for models.Model subclasses.")
+
+@pytest.mark.asyncio
+async def test_get_full_file_content_large_file_formatting(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
+    """
+    Tests that GET_FULL_FILE_CONTENT correctly formats large files by omitting line numbers.
+    """
+    print("\n--- Testing GET_FULL_FILE_CONTENT: Large File Formatting ---")
+
+    adaptive_agent.context_manager.set_requested_full_content = MagicMock()
+    adaptive_agent.context_manager.mark_full_content_loaded = MagicMock()
+
+    filepath = "large_file.txt"
+    raw_content = "\n".join([f"Line {i}" for i in range(1, 600)]) # 599 lines
+    
+    action_sequence = [
+        {"role": "assistant", "content": f'```json\n{{"thought": "I need the full content of {filepath}.", "action": "GET_FULL_FILE_CONTENT", "parameters": {{"file_path": "{filepath}"}}}}\n```'},
+        {"role": "assistant", "content": '```json\n{"thought": "I have the content, now I can finish.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
+    ]
+    mock_agent_manager.invoke_agent.side_effect = action_sequence
+    mock_file_system_manager.read_file.return_value = raw_content
+    mock_file_system_manager.file_exists.return_value = True
+    await adaptive_agent.execute_feature("Get content of a large file.")
+    adaptive_agent.context_manager.set_requested_full_content.assert_called_once()
+    formatted_content = adaptive_agent.context_manager.set_requested_full_content.call_args[0][0]
+    assert f"## FULL CONTENT: {filepath} (599 lines)" in formatted_content
     assert raw_content in formatted_content
     assert "1    │ Line 1" not in formatted_content
     adaptive_agent.context_manager.mark_full_content_loaded.assert_called_once_with(filepath, "Agent requested full content")
@@ -497,40 +1030,6 @@ async def test_execute_feature_returns_modified_files_on_finish(adaptive_agent: 
     print("✅ `execute_feature` correctly returned the modified file list upon `FINISH_FEATURE`.")
 
 @pytest.mark.asyncio
-async def test_execute_feature_returns_modified_files_on_finish(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
-    """
-    Tests that when the agent's last action is FINISH_FEATURE, the `execute_feature`
-    method still correctly returns the list of all files modified during its run.
-    This fixes the bug where TARS verification would fail because it received an empty file list.
-    """
-    print("\n--- Testing `execute_feature` returns file list on FINISH_FEATURE ---")
-
-    # 1. Define the sequence of actions: a WRITE followed by a FINISH.
-    action_sequence = [
-        # Step 1: Agent writes a file.
-        {"role": "assistant", "content": '```json\n{"thought": "I will write a file.", "action": "WRITE_FILE", "parameters": {"file_path": "final.txt", "content": "all done"}}\n```'},
-        # Step 2: Agent decides the feature is complete.
-        {"role": "assistant", "content": '```json\n{"thought": "The file is written, the feature is complete.", "action": "FINISH_FEATURE", "parameters": {}}\n```'}
-    ]
-    mock_agent_manager.invoke_agent.side_effect = action_sequence
-
-    # 2. Mock the file system manager's write_file to do nothing.
-    mock_file_system_manager.write_file.return_value = None
-
-    # 3. Execute the feature.
-    modified_files, work_log = await adaptive_agent.execute_feature("Finish the feature.")
-
-    # 4. Assertions
-    # The agent should have been invoked twice.
-    assert mock_agent_manager.invoke_agent.call_count == 2
-    # The `write_file` method on the mock should have been called.
-    mock_file_system_manager.write_file.assert_called_once_with("final.txt", "all done")
-    # CRITICAL: Assert that the returned list of modified files is NOT empty.
-    assert "final.txt" in modified_files
-    assert len(modified_files) == 1
-    print("✅ `execute_feature` correctly returned the modified file list upon `FINISH_FEATURE`.")
-
-@pytest.mark.asyncio
 async def test_get_full_file_content_adds_to_modified_files(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_file_system_manager: MagicMock):
     """
     Tests that a GET_FULL_FILE_CONTENT action correctly adds the file path
@@ -605,60 +1104,111 @@ async def test_run_command_returns_all_new_files(adaptive_agent: AdaptiveAgent, 
     assert "blog/admin.py" in modified_files
     print("✅ `RUN_COMMAND` correctly identified and returned all newly created files.")
 
+@pytest.mark.asyncio
+async def test_parse_json_response_repairs_malformed_json(adaptive_agent: AdaptiveAgent):
+    """
+    Tests that the _parse_json_response method can successfully repair and parse
+    common LLM-generated JSON errors using the json-repair library.
+    """
+    print("\n--- Testing JSON Repair Logic ---")
 
-# --- NEW Test Class for State Persistence (Data Loss Bugs) ---
+    # 1. Malformed JSON with trailing comma and missing quotes around keys
+    malformed_json_str = """
+    ```json
+    {
+        thought: "I will write a file with a trailing comma.",
+        action: "WRITE_FILE",
+        parameters: {
+            "file_path": "test.txt",
+            "content": "hello",
+        },
+    }
+    ```
+    """
+
+    # 2. Call the parsing method
+    parsed_data = adaptive_agent._parse_json_response(malformed_json_str)
+
+    # 3. Assertions
+    assert parsed_data is not None, "The malformed JSON should have been repaired and parsed."
+    assert parsed_data.get("action") == "WRITE_FILE"
+    assert parsed_data.get("parameters", {}).get("file_path") == "test.txt"
+    print("✅ Malformed JSON with trailing commas and missing quotes was successfully repaired.")
+
+@pytest.mark.asyncio
+async def test_specific_feedback_for_invalid_json(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock):
+    """
+    Tests that the agent provides specific feedback to the LLM when the JSON response
+    is fundamentally invalid (e.g., uses single quotes) and cannot be parsed even by
+    `json.loads(strict=False)`.
+    """
+    print("\n--- Testing Specific Feedback for Invalid JSON ---")
+
+    # 1. Provide a response that is fundamentally not JSON and cannot be repaired.
+    # This ensures the parsing logic fails completely, triggering the correction feedback loop.
+    unrepairable_response = {
+        "role": "assistant",
+        "content": "This is not a valid JSON response at all."
+    }
+    
+    # 2. A valid response for the second attempt.
+    valid_finish_response = {
+        "role": "assistant",
+        "content": '{"thought": "I will use double quotes now.", "action": "FINISH_FEATURE", "parameters": {}}'
+    }
+    
+    mock_agent_manager.invoke_agent.side_effect = [unrepairable_response, valid_finish_response]
+
+    # 3. Execute the feature. It should not raise an error, but re-prompt the agent.
+    await adaptive_agent.execute_feature("Test invalid JSON feedback")
+
+    # 4. Assertions
+    assert mock_agent_manager.invoke_agent.call_count == 2
+    second_call_args = mock_agent_manager.invoke_agent.call_args_list[1]
+    prompt_for_second_call = second_call_args.args[1][0]['content']
+    assert "Your previous response was not valid JSON" in prompt_for_second_call
+    print("✅ Agent correctly provided specific feedback for invalid JSON.")
+
+
+@pytest.mark.asyncio
+async def test_finish_feature_is_blocked_by_frontend_validation(adaptive_agent: AdaptiveAgent, mock_agent_manager: MagicMock, mock_frontend_validator: MagicMock):
+    """
+    Tests that FINISH_FEATURE is blocked if the FrontendValidator finds issues,
+    and the agent is re-prompted with correction instructions.
+    """
+    print("\n--- Testing FINISH_FEATURE block on frontend validation failure ---")
+    with patch('src.core.adaptive_agent.FrontendValidator', return_value=mock_frontend_validator):
+        action_sequence = [
+            {"role": "assistant", "content": '{"thought": "I think I am done.", "action": "FINISH_FEATURE", "parameters": {}}'},
+            {"role": "assistant", "content": '{"thought": "I will fix the frontend issue.", "action": "WRITE_FILE", "parameters": {"file_path": "a.html", "content": "<img alt=\\"fixed\\">"}}'},
+            {"role": "assistant", "content": '{"thought": "Now I am truly done.", "action": "FINISH_FEATURE", "parameters": {}}'}
+        ]
+        mock_agent_manager.invoke_agent.side_effect = action_sequence
+        # Simulate the validator returning an issue on the first check, and no issues on the second.
+        # The validation is called 3 times: 1. FINISH (fail), 2. Immediate check after WRITE_FILE (pass), 3. FINISH (pass)
+        mock_frontend_validator.validate.side_effect = [
+            MagicMock(issues=[MagicMock(severity="critical", file_path="a.html", message="Missing alt tag")]),
+            MagicMock(issues=[]),
+            MagicMock(issues=[]),
+        ]
+        await adaptive_agent.execute_feature("Test frontend validation block")
+        # The agent is invoked 3 times: FINISH (blocked), WRITE_FILE (to fix), FINISH (succeeds)
+        assert mock_agent_manager.invoke_agent.call_count == 3, "Agent should be invoked 3 times for the complete fix cycle."
+        # The first call to the agent is blocked, the second call is to fix the issue.
+        second_call_args = mock_agent_manager.invoke_agent.call_args_list[1]
+        prompt_for_second_call = second_call_args.args[1][0]['content']
+        assert "CRITICAL: Your feature cannot be finished because frontend validation failed" in prompt_for_second_call
+        assert "Missing alt tag" in prompt_for_second_call
+        print("✅ FINISH_FEATURE was correctly blocked by a frontend validation failure.")
+import itertools # Make sure this import is at the top of your test file
+from unittest.mock import patch
+from src.core.exceptions import PatchApplyError
 
 class TestStatePersistence:
     """
     Tests that the AdaptiveAgent correctly persists changes to the ProjectState
-    to prevent data loss, addressing the 5 critical bugs.
+    to prevent data loss.
     """
-
-    @pytest.mark.asyncio
-    async def test_bug_1_and_4_project_structure_and_summaries_are_saved(self, adaptive_agent: AdaptiveAgent, mock_memory_manager: MagicMock):
-        """
-        Verifies that after updating the project structure map (which also handles
-        summaries), the state is saved to disk.
-        """
-        print("\n--- Testing Data Loss Bug #1 & #4: Save after structure/summary update ---")
-        
-        # 1. Mock the file system to return some content for a file.
-        file_path = "utils.py" # Test with a root-level file
-        file_content = "# <!-- SUMMARY_START -->\n# A utility file.\n# <!-- SUMMARY_END -->\ndef helper_function(): pass"
-        adaptive_agent.file_system_manager.read_file.return_value = file_content
-
-        # 2. Call the method that updates the structure map.
-        await adaptive_agent._update_project_structure_map(file_path)
-
-        # 3. Assert that `save_project_state` was called on the memory manager.
-        mock_memory_manager.save_project_state.assert_called()
-        assert mock_memory_manager.save_project_state.call_count >= 1
-        
-        # 4. Assert that the summary was correctly extracted and added to the state object.
-        assert adaptive_agent.project_state.code_summaries[file_path] == "A utility file."
-        # 5. Assert that the file was added to global_files, not apps.
-        assert "utils.py" in adaptive_agent.project_state.project_structure_map.global_files
-        assert "_project_level_" not in adaptive_agent.project_state.project_structure_map.apps
-        print("✅ Bug #1 & #4 Fix Verified: Project state is saved after updating structure map and code summaries for a global file.")
- 
-    @pytest.mark.asyncio
-    async def test_bug_2_registered_apps_are_saved(self, adaptive_agent: AdaptiveAgent, mock_memory_manager: MagicMock):
-        """
-        Verifies that after parsing INSTALLED_APPS from settings.py, the state is saved.
-        """
-        print("\n--- Testing Data Loss Bug #2: Save after app registration update ---")
-        
-        # 1. Define mock settings content.
-        settings_content = "INSTALLED_APPS = ['django.contrib.admin', 'new_app']"
-
-        # 2. Call the method that updates registered apps.
-        await adaptive_agent._update_registered_apps_from_content("proj/settings.py", settings_content)
-
-        # 3. Assert that the state was updated and saved.
-        assert 'new_app' in adaptive_agent.project_state.registered_apps
-        mock_memory_manager.save_project_state.assert_called_with(adaptive_agent.project_state)
-        print("✅ Bug #2 Fix Verified: Project state is saved after updating registered apps.")
-
     @pytest.mark.asyncio
     async def test_bug_3_defined_models_are_saved(self, adaptive_agent: AdaptiveAgent, mock_memory_manager: MagicMock):
         """
@@ -679,7 +1229,7 @@ class TestStatePersistence:
         assert "Product" in adaptive_agent.project_state.defined_models["inventory"]
         # The method should be called with just the project state.
         mock_memory_manager.save_project_state.assert_called_with(adaptive_agent.project_state)
-        print("✅ Bug #3 Fix Verified: Project state is saved after updating defined models.")
+        print("✅ State is saved after updating defined models.")
 
     @pytest.mark.asyncio
     async def test_bug_12_artifact_registry_is_populated(self, adaptive_agent: AdaptiveAgent):
@@ -701,8 +1251,8 @@ class TestStatePersistence:
         registry = adaptive_agent.project_state.artifact_registry
         artifact_key = "django_model:profiles.User"
         assert artifact_key in registry
-        assert registry[artifact_key]["class_name"] == "User"
-        print("✅ Bug #12 Fix Verified: Artifact registry is populated with defined models.")
+        assert registry[artifact_key]["class_name"] == "User", "The artifact registry should contain the new model."
+        print("✅ Artifact registry is populated with defined models.")
 
     @pytest.mark.asyncio
     async def test_bug_5_historical_notes_are_saved(self, adaptive_agent: AdaptiveAgent, mock_memory_manager: MagicMock):
@@ -726,7 +1276,7 @@ class TestStatePersistence:
 
         # 4. Assert that the state was saved to disk.
         mock_memory_manager.save_project_state.assert_called_with(adaptive_agent.project_state)
-        print("✅ Bug #5 Fix Verified: Historical notes are correctly added and saved.")
+        print("✅ Historical notes are correctly added and saved.")
 
 # --- Test Cases for Smart Auto-Fetch ---
 

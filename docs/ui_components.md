@@ -233,6 +233,35 @@ def save_settings(self):
 
 ---
 
+#### D. Dynamic Model Management (NEW in v0.3.0)
+
+**The Problem**: New AI models are released frequently. Users shouldn't have to manually edit `providers.json` every time OpenAI or Google releases a new model like `gpt-5` or `gemini-2.5-pro`.
+
+**The Solution**: A "Manage" button next to the model selection dropdown that opens a dedicated dialog.
+
+```python
+def _open_manage_models_dialog(self):
+    """Opens a dialog to add or remove models for the current provider."""
+    provider_id = self._get_selected_provider_id()
+    # ... create dialog ...
+
+def add_model(self):
+    # Calls config_manager.add_model_to_provider(...)
+    # Refreshes UI lists
+
+def remove_model(self, model_id):
+    # Calls config_manager.remove_model_from_provider(...)
+    # Refreshes UI lists
+```
+
+**Benefits**:
+✅ **Future-Proof** - Users can add new models the day they are released.
+✅ **Customization** - Users can remove models they don't use to declutter the list.
+✅ **User-Friendly** - No need to find and edit configuration files.
+✅ **Safe** - Prevents users from accidentally breaking the `providers.json` format.
+
+---
+
 ## 📊 Component Value Matrix
 
 | Component | Size | Purpose | User Benefit | Priority |
@@ -241,9 +270,10 @@ def save_settings(self):
 | **ToolTip** | 4.4 KB | Inline help | Self-documenting UI | 🟡 High Value |
 | **MainWindow (progress)** | ~5 KB | Real-time feedback | Transparency, trust | 🔴 Critical |
 | **MainWindow (shutdown)** | ~2 KB | Safety checks | Data protection | 🔴 Critical |
+| **MainWindow (model mgmt)** | ~3 KB | Add/remove models in UI | Future-proofing, customization | 🟡 High Value |
 | **MainWindow (settings)** | ~8 KB | Persistence | Convenience, security | 🟡 High Value |
 
-**Total High-Value Code**: ~27 KB out of 194 KB (14% of UI code drives 90% of value)
+**Total High-Value Code**: ~30 KB out of 194 KB (15% of UI code drives 90%+ of value)
 
 ---
 
@@ -771,20 +801,20 @@ All 14 tests pass consistently, ensuring bulletproof GUI control logic! ✅
 
 ## 🌟 Summary
 
-**3 UI components** provide **critical user experience improvements**:
+**3 UI components** provide **critical user experience improvements**, with key features in `MainWindow` delivering much of the value:
 
 ✅ **UserActionDialog** (7.7 KB) - Enables manual terminal commands (pip install, venv activation)  
 ✅ **ToolTip** (4.4 KB) - Self-documenting interface for 120+ models and complex settings  
-✅ **MainWindow highlights** (~15 KB) - Real-time progress, shutdown protection, settings persistence  
+✅ **MainWindow highlights** (~18 KB) - Real-time progress, shutdown protection, settings persistence, and dynamic model management  
 
 **Key Achievements**:
 - **Safety**: Confirms exit if workflow running (prevents data loss)
 - **Transparency**: Real-time progress updates (user sees every step)
 - **Convenience**: Settings and API keys persisted (one-time setup)
 - **Discoverability**: Tooltips explain features (reduces support burden)
-- **Flexibility**: Manual command execution (works with any shell)
+- **Flexibility**: Manual command execution and dynamic model management
 
-**This is why VebGen feels polished and professional—these ~27 KB of UI code deliver 90% of the UX value.**
+**This is why VebGen feels polished and professional—these ~30 KB of UI code deliver 90%+ of the UX value.**
 
 ---
 

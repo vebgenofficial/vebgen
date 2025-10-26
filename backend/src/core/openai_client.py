@@ -1,4 +1,4 @@
-# src/core/openai_client.py
+# backend/src/core/openai_client.py
 import logging
 import json
 from typing import List, Optional

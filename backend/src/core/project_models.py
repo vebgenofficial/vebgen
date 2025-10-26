@@ -1,4 +1,4 @@
-# src/core/project_models.py
+# backend/src/core/project_models.py
 import logging
 import traceback # For detailed validation errors
 from enum import Enum
@@ -426,31 +426,188 @@ class DjangoMigrationDetails(BaseModel):
     dependencies: List[Tuple[str, str]] = Field(default_factory=list) # List of (app_name, migration_name)
     operations: List[DjangoMigrationOperation] = Field(default_factory=list)
 
-class TemplateFileDetails(BaseModel):
-    """Structured representation of an HTML/Jinja2 template file."""
-    extends_template: Optional[str] = None
-    includes_templates: List[str] = Field(default_factory=list)
-    extends_base_html_unresolved: bool = False # New flag for planner
-    static_files_used: List[str] = Field(default_factory=list)
-    url_references: List[str] = Field(default_factory=list) # Names or paths used in {% url %}
-    key_dom_ids: List[str] = Field(default_factory=list) # IDs of significant DOM elements
-    i18n_tags_used: List[str] = Field(default_factory=list) # e.g., 'trans', 'blocktrans'
-    # context_variables_used: List[str] = Field(default_factory=list) # Already exists
-    context_variables_used: List[str] = Field(default_factory=list)
-    form_targets: List[str] = Field(default_factory=list) # URLs that forms post to
+# --- NEW: JavaScript Parsing Models (Phase 3) ---
 
-class JSFileDetails(BaseModel):
-    """Structured representation of a JavaScript file."""
-    imports_from: List[str] = Field(default_factory=list)
-    ajax_calls_to_urls: List[str] = Field(default_factory=list)
-    accesses_dom_ids: List[str] = Field(default_factory=list)
-    global_functions: List[str] = Field(default_factory=list) # Top-level functions
+class JSValidationIssue(BaseModel):
+    """Represents a single validation issue found in a JavaScript file."""
+    severity: Literal["error", "warning", "info"]
+    category: Literal["ModernJS", "Organization", "DOM", "API", "Forms", "Performance", "Security", "Compatibility"]
+    message: str
+    line: Optional[int] = None
+    element_preview: Optional[str] = None
+
+class JSValidationResults(BaseModel):
+    """Container for all validation results for a JavaScript file."""
+    modernjs_issues: List[JSValidationIssue] = Field(default_factory=list, alias="ModernJS")
+    organization_issues: List[JSValidationIssue] = Field(default_factory=list, alias="Organization")
+    dom_issues: List[JSValidationIssue] = Field(default_factory=list, alias="DOM")
+    api_issues: List[JSValidationIssue] = Field(default_factory=list, alias="API")
+    forms_issues: List[JSValidationIssue] = Field(default_factory=list, alias="Forms")
+    performance_issues: List[JSValidationIssue] = Field(default_factory=list, alias="Performance")
+    security_issues: List[JSValidationIssue] = Field(default_factory=list, alias="Security")
+    compatibility_issues: List[JSValidationIssue] = Field(default_factory=list, alias="Compatibility")
+
+class JSFunction(BaseModel):
+    """Represents a JavaScript function declaration or expression."""
+    name: str
+    is_async: bool = False
+    params: List[str] = Field(default_factory=list)
+
+class JSVariable(BaseModel):
+    """Represents a JavaScript variable declaration."""
+    name: str
+    type: Literal["const", "let", "var"]
+
+class JSEventListener(BaseModel):
+    """Represents an addEventListener call."""
+    target_selector: str
+    event_type: str
+    handler_name: str
+
+class JSAPICall(BaseModel):
+    """Represents a fetch or XMLHttpRequest call."""
+    method: str
+    url: str
+    is_async: bool = True
+ 
+# --- NEW: CSS Parsing Models (Phase 2) ---
+ 
+class CSSValidationIssue(BaseModel):
+    """Represents a single validation issue found in a CSS file."""
+    severity: Literal["error", "warning", "info"]
+    category: Literal["Architecture", "Naming", "Performance", "Responsive", "Accessibility", "Compatibility"]
+    message: str
+    line: Optional[int] = None
+    element_preview: Optional[str] = None
+ 
+class CSSValidationResults(BaseModel):
+    """Container for all validation results for a CSS file."""
+    architecture_issues: List[CSSValidationIssue] = Field(default_factory=list)
+    naming_issues: List[CSSValidationIssue] = Field(default_factory=list)
+    performance_issues: List[CSSValidationIssue] = Field(default_factory=list)
+    responsive_issues: List[CSSValidationIssue] = Field(default_factory=list)
+    accessibility_issues: List[CSSValidationIssue] = Field(default_factory=list)
+    compatibility_issues: List[CSSValidationIssue] = Field(default_factory=list)
+ 
+class CSSRule(BaseModel):
+    """Represents a single CSS rule (selector + properties)."""
+    selector: str
+    properties: Dict[str, str] = Field(default_factory=dict)
+    specificity: Tuple[int, int, int] = Field(default=(0, 0, 0), description="(IDs, classes/attributes, elements)")
+ 
+class CSSMediaQuery(BaseModel):
+    """Represents a @media query block."""
+    condition: str
+    rules: List[CSSRule] = Field(default_factory=list)
+ 
+class CSSAnimation(BaseModel):
+    """Represents a @keyframes animation definition."""
+    name: str
+    steps: Dict[str, Dict[str, str]] = Field(default_factory=dict, description="e.g., {'from': {'opacity': '0'}, '100%': {'opacity': '1'}}")
+
+# --- NEW: HTML Parsing Models (Phase 1) ---
+
+class HTMLValidationIssue(BaseModel):
+    """Represents a single validation issue found in an HTML file."""
+    severity: Literal["critical", "high", "medium", "low", "info", "error", "warning"]
+    category: Literal["Structure", "Accessibility", "SEO", "Forms"]
+    message: str
+    file_path: Optional[str] = None # Add this line
+    element_preview: Optional[str] = None # A snippet of the problematic element
+
+class HTMLValidationResults(BaseModel):
+    """Container for all validation results for an HTML file."""
+    structure_issues: List[HTMLValidationIssue] = Field(default_factory=list)
+    accessibility_issues: List[HTMLValidationIssue] = Field(default_factory=list)
+    seo_issues: List[HTMLValidationIssue] = Field(default_factory=list) # type: ignore
+    forms_issues: List[HTMLValidationIssue] = Field(default_factory=list)
+
+class HTMLMeta(BaseModel):
+    """Represents an HTML <meta> tag."""
+    name: Optional[str] = None
+    property: Optional[str] = None # For Open Graph tags
+    content: Optional[str] = None
+    charset: Optional[str] = None
+
+class HTMLScript(BaseModel):
+    """Represents an HTML <script> tag."""
+    src: Optional[str] = None
+    is_inline: bool = False
+    is_async: bool = False
+    is_defer: bool = False
+
+class HTMLLink(BaseModel):
+    """Represents an HTML <link> tag."""
+    rel: str
+    href: str
+    type: Optional[str] = None
+
+class HTMLFormInput(BaseModel):
+    """Represents an <input>, <textarea>, or <select> element within a form."""
+    tag: str # 'input', 'textarea', 'select'
+    type: Optional[str] = None
+    name: Optional[str] = None
+    id: Optional[str] = None
+    label: Optional[str] = None # The text of the associated <label>
+    is_required: bool = False
+
+class HTMLForm(BaseModel):
+    """Represents an HTML <form> element."""
+    id: Optional[str] = None
+    action: Optional[str] = None
+    method: str = "GET" # Default method
+    inputs: List[HTMLFormInput] = Field(default_factory=list)
+    has_csrf_token: bool = False
+
+class HTMLFileDetails(BaseModel):
+    """Structured representation of an HTML/Template file using BeautifulSoup."""
+    doctype_present: bool = False
+    lang: Optional[str] = None
+    title: Optional[str] = None
+    meta_tags: List[HTMLMeta] = Field(default_factory=list)
+    links: List[HTMLLink] = Field(default_factory=list)
+    scripts: List[HTMLScript] = Field(default_factory=list)
+    forms: List[HTMLForm] = Field(default_factory=list)
+    validation: HTMLValidationResults = Field(default_factory=HTMLValidationResults)
+    django_template_tags: List[str] = Field(default_factory=list) # e.g., 'static', 'url'
+
+class VanillaJSFileDetails(BaseModel):
+    """Structured representation of a vanilla JavaScript file."""
+    imports: List[str] = Field(default_factory=list)
+    exports: List[str] = Field(default_factory=list)
+    functions: List[JSFunction] = Field(default_factory=list)
+    variables: List[JSVariable] = Field(default_factory=list)
+    dom_manipulations: List[Tuple[str, str]] = Field(default_factory=list)
+    event_listeners: List[JSEventListener] = Field(default_factory=list)
+    api_calls: List[JSAPICall] = Field(default_factory=list)
+    local_storage_usage: List[str] = Field(default_factory=list)
+    validation: JSValidationResults = Field(default_factory=JSValidationResults)
+
+class FrontendValidationIssue(BaseModel):
+    """Represents a single, unified validation issue for the frontend, with priority."""
+    severity: Literal["critical", "high", "medium", "low", "info", "error", "warning"] # type: ignore
+    category: Literal["Functionality", "Accessibility", "Performance", "SEO", "Security", "Compatibility", "Structure", "Naming", "DOM", "API", "Forms", "Organization"]
+    message: str
+    file_path: str = ""
+    line: Optional[int] = None
+    element_preview: Optional[str] = None
+
+class FrontendValidationReport(BaseModel):
+    """A comprehensive report of all frontend validation issues, prioritized."""
+    total_issues: int = 0
+    issues: List[FrontendValidationIssue] = Field(default_factory=list)
 
 class CSSFileDetails(BaseModel):
-    """Structured representation of a CSS file."""
-    imports_css: List[str] = Field(default_factory=list)
-    defines_selectors: List[str] = Field(default_factory=list) # Key IDs and classes
-
+    """Structured representation of a CSS/SCSS file using tinycss2."""
+    imports: List[str] = Field(default_factory=list)
+    custom_properties: Dict[str, str] = Field(default_factory=dict)
+    rules: List[CSSRule] = Field(default_factory=list)
+    media_queries: List[CSSMediaQuery] = Field(default_factory=list)
+    animations: List[CSSAnimation] = Field(default_factory=list)
+    font_faces: List[Dict[str, str]] = Field(default_factory=list)
+    uses_grid: bool = False
+    uses_flexbox: bool = False
+    validation: CSSValidationResults = Field(default_factory=CSSValidationResults)
 # --- NEW: GraphQL Schema Models ---
 class GraphQLField(BaseModel):
     """Represents a field within a Graphene-Django GraphQL type."""
@@ -533,8 +690,8 @@ class FileStructureInfo(BaseModel):
     django_channels_consumer_details: Optional['DjangoChannelsFileDetails'] = None # New
     django_channels_routing_details: Optional[DjangoChannelsRouting] = None # New
     django_apps_config_details: Optional[PythonFileDetails] = None # For apps.py
-    template_details: Optional[TemplateFileDetails] = None
-    js_details: Optional[JSFileDetails] = None
+    html_details: Optional[HTMLFileDetails] = None
+    js_details: Optional[VanillaJSFileDetails] = None
     css_details: Optional[CSSFileDetails] = None
     graphql_schema_details: Optional[GraphQLSchemaDetails] = None
     django_migration_details: Optional[DjangoMigrationDetails] = None # New field for migrations
@@ -599,6 +756,12 @@ class ProjectState(BaseModel):
     # --- NEW: Explicit State Tracking ---
     registered_apps: Set[str] = Field(default_factory=set, description="A set of Django app names that have been confirmed to be in INSTALLED_APPS.")
     defined_models: Dict[str, List[str]] = Field(default_factory=dict, description="A dictionary mapping app names to a list of model class names defined in that app.")
+    # --- NEW: Frontend Artifact Registries ---
+    html_pages: Dict[str, HTMLFileDetails] = Field(default_factory=dict)
+    css_stylesheets: Dict[str, CSSFileDetails] = Field(default_factory=dict)
+    js_scripts: Dict[str, VanillaJSFileDetails] = Field(default_factory=dict)
+    frontend_validation_results: Dict[str, List[str]] = Field(default_factory=dict)
+
     # --- END NEW ---
     remediation_config: Optional[Dict[str, bool]] = None
 

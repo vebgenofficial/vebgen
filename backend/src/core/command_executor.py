@@ -1,4 +1,4 @@
-# c:\Users\rames\WebGen\web_agent7\backend\src\core\command_executor.py
+# backend\src\core\command_executor.py
 import time
 import subprocess
 import logging # Keep logging 

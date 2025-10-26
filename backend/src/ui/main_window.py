@@ -1,4 +1,4 @@
-# src/ui/main_window.py
+# backend/src/ui/main_window.py
 import time
 import tkinter as tk
 import tempfile
@@ -509,17 +509,22 @@ class MainWindow:
         )
 
         # --- NEW: Add tags for diff highlighting ---
-        self.text_tags['diff_add'] = {"background": "#1A4A3A"} # Light green background
-        self.text_tags['diff_delete'] = {"background": "#5A2D2D"} # Light red background
+        # --- VS Code Dark+ Diff Colors ---
+        self.text_tags['diff_add'] = {"background": "#1e3a1e", "foreground": "#d4d4d4"}
+        self.text_tags['diff_delete'] = {"background": "#3f1d1d", "foreground": "#d4d4d4"}
+        self.text_tags['diff_modified'] = {"background": "#1e3d5c", "foreground": "#d4d4d4"}
         # --- NEW: Add tags for syntax highlighting (Monokai theme colors) ---
-        self.text_tags['syntax_keyword'] = {"foreground": "#f92672"}
-        self.text_tags['syntax_string'] = {"foreground": "#e6db74"}
-        self.text_tags['syntax_comment'] = {"foreground": "#75715e"}
-        self.text_tags['syntax_number'] = {"foreground": "#ae81ff"}
-        self.text_tags['syntax_function'] = {"foreground": "#a6e22e"}
-        self.text_tags['syntax_class'] = {"foreground": "#a6e22e"}
-        self.text_tags['syntax_operator'] = {"foreground": "#f92672"}
-        self.text_tags['syntax_builtin'] = {"foreground": "#66d9ef", "font": ("Consolas", 11, "italic")}
+        # --- VS Code Dark+ Theme Colors ---
+        self.text_tags["syntax_keyword"] = {"foreground": "#569cd6"}      # Blue (if, class, def, import)
+        self.text_tags["syntax_string"] = {"foreground": "#ce9178"}       # Orange-brown (strings)
+        self.text_tags["syntax_comment"] = {"foreground": "#6a9955"}      # Green (comments)
+        self.text_tags["syntax_number"] = {"foreground": "#b5cea8"}       # Light green (numbers)
+        self.text_tags["syntax_function"] = {"foreground": "#dcdcaa"}     # Yellow (function names)
+        self.text_tags["syntax_class"] = {"foreground": "#4ec9b0"}        # Cyan (class names)
+        self.text_tags["syntax_operator"] = {"foreground": "#d4d4d4"}     # Light gray (operators)
+        self.text_tags["syntax_builtin"] = {"foreground": "#4ec9b0"}      # Cyan (built-ins like print, len)
+        self.text_tags["syntax_variable"] = {"foreground": "#9cdcfe"}     # Light blue (variables)
+        self.text_tags["syntax_decorator"] = {"foreground": "#dcdcaa"}    # Yellow (decorators @app.route)
         # --- END NEW ---
 
         # Iterate through the configurations and apply them correctly.
@@ -687,10 +692,19 @@ class MainWindow:
         self.provider_dropdown.pack(fill=X, pady=(0, 15))
         ToolTip(self.provider_dropdown, text="Select the AI service provider.")
 
+        model_frame = ctk.CTkFrame(ai_settings_frame, fg_color="transparent")
+        model_frame.pack(fill=X, pady=(0, 15))
+        model_frame.grid_columnconfigure(0, weight=1)
+        
         model_label = ctk.CTkLabel(ai_settings_frame, text="LLM Model", anchor="w", font=ctk.CTkFont(family="Segoe UI", size=13))
         model_label.pack(fill=X, pady=(0, 5))
-        self.model_dropdown = ctk.CTkComboBox(ai_settings_frame, variable=self.model_var, state=DISABLED, command=self.on_model_selected)
-        self.model_dropdown.pack(fill=X, pady=(0, 15))
+        self.model_dropdown = ctk.CTkComboBox(model_frame, variable=self.model_var, state=DISABLED, command=self.on_model_selected)
+        self.model_dropdown.grid(row=0, column=0, sticky="ew")
+
+        manage_models_button = ctk.CTkButton(model_frame, text="Manage", width=70, command=self._open_manage_models_dialog, state=DISABLED)
+        manage_models_button.grid(row=0, column=1, padx=(10, 0))
+        self.manage_models_button = manage_models_button
+
         ToolTip(self.model_dropdown, text="Select the specific LLM to use for all tasks.")
 
         # Temperature Sliders
@@ -971,8 +985,8 @@ class MainWindow:
         
         # --- NEW: Configure tags for diff highlighting ---
         left_text.tag_config("diff_delete", background="#5A2D2D")
-        right_text.tag_config("diff_add", background="#1A4A3A")
-        # --- NEW: Configure tags for syntax highlighting ---
+        right_text.tag_config("diff_add", background="#1e3a1e")
+        # --- NEW: Configure tags for syntax highlighting (VS Code Theme) ---
         left_text.tag_config("syntax_keyword", foreground="#f92672")
         left_text.tag_config("syntax_string", foreground="#e6db74")
         left_text.tag_config("syntax_comment", foreground="#75715e")
@@ -1056,21 +1070,24 @@ class MainWindow:
         """Applies pygments-based syntax highlighting to a specific range in a CTkTextbox."""
         try:
             lexer = get_lexer_by_name(language, stripall=True)
-        except Exception:
+        except Exception: # pygments.util.ClassNotFound
             lexer = TextLexer() # Fallback for unknown languages
 
         # Define a mapping from Pygments token types to our custom Tkinter tags
-        from pygments.token import Keyword, Name, String, Comment, Number, Operator, Punctuation
+        from pygments.token import Keyword, Name, String, Comment, Number, Operator, Punctuation, Text
         token_to_tag = {
-            Keyword: "syntax_keyword",
-            String: "syntax_string",
-            Comment: "syntax_comment",
-            Number: "syntax_number",
-            Name.Function: "syntax_function",
-            Name.Class: "syntax_class",
-            Name.Builtin: "syntax_builtin",
-            Operator: "syntax_operator",
-            Punctuation: "syntax_operator",
+            Keyword: "syntax_keyword",              # if, class, def
+            String: "syntax_string",                # "strings"
+            Comment: "syntax_comment",              # # comments
+            Number: "syntax_number",                # 123
+            Name.Function: "syntax_function",       # function_name()
+            Name.Class: "syntax_class",             # ClassName
+            Name.Builtin: "syntax_builtin",         # print, len
+            Name.Decorator: "syntax_decorator",     # @decorator
+            Name.Variable: "syntax_variable",       # variable_name
+            # Name.Constant: "syntax_constant",       # CONSTANT_NAME
+            Operator: "syntax_operator",            # +, -, =
+            Punctuation: "syntax_operator",         # (, ), [, ]
         }
 
         # Tokenize the line of code
@@ -1274,6 +1291,9 @@ class MainWindow:
         if self.tars_temp_scale: self.tars_temp_scale.configure(state=DISABLED)
         if self.case_temp_scale: self.case_temp_scale.configure(state=DISABLED)
         if self.change_api_key_button: self.change_api_key_button.configure(state=DISABLED)
+        if hasattr(self, 'manage_models_button'):
+            self.manage_models_button.configure(state=DISABLED)
+
 
     def _set_ui_project_selected_state(self):
         """Enables UI controls after a project directory is selected and basic configs are loaded."""
@@ -1290,6 +1310,8 @@ class MainWindow:
         if self.tars_temp_scale: self.tars_temp_scale.configure(state=NORMAL)
         if self.case_temp_scale: self.case_temp_scale.configure(state=NORMAL)
         if self.change_api_key_button: self.change_api_key_button.configure(state=NORMAL)
+        if hasattr(self, 'manage_models_button'):
+            self.manage_models_button.configure(state=NORMAL)
         # Send button enabled only after stage 2 init is complete
         if self.send_button: self.send_button.configure(state=DISABLED) # Keep disabled until stage 2 finishes
 
@@ -1522,6 +1544,10 @@ class MainWindow:
 
                 if has_code and state_is_empty:
                     logger.error("UI DETECTED POTENTIAL STATE CORRUPTION: Empty state loaded for a project with code.")
+                    # Show user-friendly message in UI
+                    self.update_progress_safe({
+                        'system_message': "🔍 Detected existing project code. Performing initial scan to understand your codebase..."
+                    })
                     # Create a temporary Toplevel to get a handle for setting the icon
                     temp_dialog_parent = tk.Toplevel(self.master)
                     temp_dialog_parent.withdraw() # Hide the temporary window
@@ -2022,6 +2048,10 @@ class MainWindow:
             if self.case_temp_scale and self.case_temp_scale.winfo_exists(): self.case_temp_scale.configure(state=new_state)
             if self.select_project_button and self.select_project_button.winfo_exists(): self.select_project_button.configure(state=new_state)
 
+            # Manage models button
+            if hasattr(self, 'manage_models_button') and self.manage_models_button.winfo_exists():
+                self.manage_models_button.configure(state=new_state)
+
             # Set cursor for the main window
             if self.master.winfo_exists():
                 self.master.config(cursor=self.default_cursor_spec)
@@ -2448,21 +2478,23 @@ class MainWindow:
         """Parses Pygments-generated HTML and applies styles to a CTkTextbox."""
         def __init__(self, text_widget: ctk.CTkTextbox, style_name: str = 'monokai'):
             super().__init__()
-            self.widget = text_widget
-            self.tags = []
-            self.style_name = style_name
-            # Pre-define some basic styles to avoid creating them repeatedly
-            try:
-                self.widget.tag_config("code_block_base", background="#1E1E2E")
-            except Exception:
-                pass # Ignore if it fails, font is the main issue
+            self.widget = text_widget # The CTkTextbox to apply tags to
+            self.tags = [] # A stack to keep track of current HTML tags
+            self.style_name = style_name # The Pygments style name
+            # Pre-define the base style for the code block background
+            if "code_block_base" not in self.widget.tag_names():
+                try:
+                    self.widget.tag_config("code_block_base", background="#1e1e1e") # VS Code editor background
+                except Exception as e:
+                    logger.warning(f"Could not configure base code block tag: {e}")
 
         def handle_starttag(self, tag, attrs):
             if tag == 'span':
                 style_dict = {}
                 for attr, value in attrs:
                     if attr == 'style':
-                        # Simple style parser for "key: value; key2: value2"
+                        # Simple style parser for "key: value; key2: value2".
+                        # This is how Pygments' HtmlFormatter with noclasses=True works.
                         style_rules = value.split(';')
                         for rule in style_rules:
                             if ':' in rule:
@@ -2470,18 +2502,19 @@ class MainWindow:
                                 style_dict[key.strip()] = val.strip()
                 
                 if style_dict:
-                    # Create a unique tag name based on the style
+                    # Create a unique tag name based on the style hash to avoid conflicts
                     tag_name = f"style_{hash(value)}"
                     
                     # Configure the tag in the widget if it doesn't exist
                     if tag_name not in self.widget.tag_names():
+                        # We can't set the font per-tag in CTkTextbox, so we focus on color.
                         font_weight = "bold" if style_dict.get('font-weight') == 'bold' else "normal"
                         font_slant = "italic" if style_dict.get('font-style') == 'italic' else "roman"
 
                         self.widget.tag_config(
                             tag_name,
                             foreground=style_dict.get('color'),
-                            # font=font # This is forbidden
+                            # The 'font' option is not supported per-tag in CTkTextbox, so we omit it.
                             # We can add underline or other supported styles here if needed
                         )
                     self.tags.append(tag_name)
@@ -2492,7 +2525,7 @@ class MainWindow:
 
         def handle_data(self, data):
             # Apply the current stack of tags plus the base style
-            current_tags = tuple(self.tags + ["code_block_base"])
+            current_tags = tuple(self.tags + ["code_block_base"]) # Apply background and then foreground styles
             self.widget.insert("end", data, current_tags)
 
     def _display_highlighted_code(self, widget: ctk.CTkTextbox, code: str, language: str):
@@ -2507,7 +2540,7 @@ class MainWindow:
                 widget.insert("end", code, "code_block_base")
                 return
 
-        # Use a dark theme that fits the UI
+        # Use a dark theme that fits the UI. 'monokai' is a good default.
         formatter = HtmlFormatter(style='monokai', noclasses=True, nobackground=True)
         highlighted_html = highlight(code, lexer, formatter)
 
@@ -2641,10 +2674,10 @@ class MainWindow:
         # Code content textbox
         code_textbox = ctk.CTkTextbox(
             code_frame,
-            fg_color="#1E1E2E",
-            text_color="#CDD6F4",
+            fg_color="#1e1e1e",    # VS Code editor background
+            text_color="#d4d4d4",  # VS Code default text color (slightly muted white)
             font=("Consolas", 11),
-            wrap="none",
+            wrap="none", # type: ignore
             activate_scrollbars=True,
             height=300  # Initial limited height
         )        
@@ -3273,6 +3306,83 @@ class MainWindow:
         else: # User clicked Cancel
             dialog_parent.destroy()
             logger.info("Manual API key change was cancelled by the user.")
+
+    def _open_manage_models_dialog(self):
+        """Opens a dialog to add or remove models for the current provider."""
+        if not self.config_manager:
+            return
+
+        provider_id = self._get_selected_provider_id()
+        if provider_id == "all":
+            messagebox.showwarning("Select Provider", "Please select a specific provider to manage its models.", parent=self.master)
+            return
+
+        dialog = ctk.CTkToplevel(self.master)
+        dialog.title(f"Manage Models for {self.provider_var.get()}")
+        dialog.geometry("500x600")
+        dialog.transient(self.master)
+        dialog.grab_set()
+
+        main_frame = ctk.CTkFrame(dialog)
+        main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        label = ctk.CTkLabel(main_frame, text=f"Models for {self.provider_var.get()}", font=("Segoe UI", 16, "bold"))
+        label.pack(pady=(0, 10))
+
+        scroll_frame = ctk.CTkScrollableFrame(main_frame, label_text="Current Models")
+        scroll_frame.pack(fill="both", expand=True, pady=5)
+
+        def refresh_model_list():
+            for widget in scroll_frame.winfo_children():
+                widget.destroy()
+
+            current_models = self.config_manager.get_models_for_provider(provider_id)
+            for model in current_models:
+                model_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+                model_frame.pack(fill="x", pady=2)
+
+                model_label = ctk.CTkLabel(model_frame, text=model['id'], anchor="w")
+                model_label.pack(side="left", fill="x", expand=True, padx=5)
+
+                delete_button = ctk.CTkButton(
+                    model_frame, text="🗑️", width=30,
+                    command=lambda p=provider_id, m=model['id']: remove_model(p, m)
+                )
+                delete_button.pack(side="right")
+
+        def remove_model(p_id, m_id):
+            if messagebox.askyesno("Confirm Delete", f"Are you sure you want to remove model '{m_id}'?", parent=dialog):
+                if self.config_manager.remove_model_from_provider(p_id, m_id):
+                    refresh_model_list()
+                    self._update_model_list(p_id) # Refresh main window dropdown
+
+        def add_model():
+            new_model_id = new_model_entry.get().strip()
+            if new_model_id:
+                if self.config_manager.add_model_to_provider(provider_id, new_model_id):
+                    new_model_entry.delete(0, "end")
+                    refresh_model_list()
+                    self._update_model_list(provider_id) # Refresh main window dropdown
+                    self.model_var.set(new_model_id) # Select the new model
+            else:
+                messagebox.showwarning("Input Required", "Please enter a model ID to add.", parent=dialog)
+
+        add_frame = ctk.CTkFrame(main_frame)
+        add_frame.pack(fill="x", pady=(10, 0))
+        add_frame.grid_columnconfigure(0, weight=1)
+
+        new_model_entry = ctk.CTkEntry(add_frame, placeholder_text="Enter new model ID (e.g., gpt-4o-mini)")
+        new_model_entry.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+
+        add_button = ctk.CTkButton(add_frame, text="Add Model", command=add_model)
+        add_button.grid(row=0, column=1)
+
+        close_button = ctk.CTkButton(main_frame, text="Close", command=dialog.destroy)
+        close_button.pack(pady=(10,0))
+
+        refresh_model_list()
+
+
 
 
     # --- Command Execution Handling ---

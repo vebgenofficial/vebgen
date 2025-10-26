@@ -1,4 +1,4 @@
-# src/main.py
+# backend/src/main.py
 import sys
 import logging
 import platform

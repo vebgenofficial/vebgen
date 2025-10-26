@@ -1,4 +1,4 @@
-# src/core/exceptions.py
+# backend/src/core/exceptions.py
 from typing import Optional
 
 class CoreError(Exception):

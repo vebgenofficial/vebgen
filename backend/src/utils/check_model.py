@@ -1,4 +1,4 @@
-# src/utils/check_model.py
+# backend/src/utils/check_model.py
 import sys
 import importlib
 import inspect

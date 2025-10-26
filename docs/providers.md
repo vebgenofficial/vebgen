@@ -124,7 +124,29 @@ This file is VebGen's **model marketplace**—a centralized configuration that l
 
 ---
 
-## 👨‍💻 For Developers: Technical Architecture
+### How to Manage Models (The Easy Way - NEW in v0.3.0)
+
+**The Problem**: Manually editing `providers.json` is risky and inconvenient just to add a new model ID (e.g., `gpt-5` is released).
+
+**VebGen's Solution**: A UI-driven model manager.
+
+**How It Works**:
+1.  **Select a Provider**: In the VebGen UI, choose a specific provider like "OpenAI" from the dropdown.
+2.  **Click "Manage"**: A "Manage" button appears next to the model selection dropdown.
+3.  **Add or Remove**: A dialog opens showing all current models for that provider. You can:
+    -   Type a new model ID (e.g., `gpt-5-turbo`) and click "Add Model".
+    -   Click the "🗑️" icon next to a model to remove it from your list.
+
+**What Happens Behind the Scenes**:
+- VebGen calls `config_manager.add_model_to_provider()` or `remove_model_from_provider()`.
+- It safely updates `providers.json` for you.
+- The model dropdown in the UI instantly refreshes with the new list.
+
+**This is the recommended way to add or remove models for an *existing* provider.** Only edit `providers.json` manually when adding a completely new provider.
+
+---
+
+## �‍💻 For Developers: Technical Architecture
 
 ### JSON Schema
 
@@ -556,6 +578,7 @@ client_classes = {
 1. **Start with free models** (OpenRouter free tier, Hugging Face)
 2. **Test quality before paying** (try multiple models for same prompt)
 3. **Use latest models** (top of each provider's list = newest)
+4. **Use the "Manage" button** in the UI to add new models as they are released.
 4. **OpenRouter for variety** (20 free models to experiment with)
 
 ### For Developers

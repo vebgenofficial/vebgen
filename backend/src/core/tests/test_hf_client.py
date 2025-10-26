@@ -1,4 +1,4 @@
-# c/Users/USER/Documents/webagent/vebgen sharp updated/backend/src/core/tests/test_hf_client.py
+# backend/src/core/tests/test_hf_client.py
 import pytest
 from unittest.mock import MagicMock, patch
 import json

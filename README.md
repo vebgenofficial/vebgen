@@ -15,7 +15,9 @@
 
 *Zero-token code intelligence • Military-grade sandbox • Dual-agent self-remediation*
 
-[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![Tests](https://img.shields.io/badge/tests-309%20passed-brightgreen.svg)](backend/src/core/tests/)
+[![Python Version](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/) [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) [![Tests](https://img.shields.io/badge/tests-356%20passed-brightgreen.svg)](backend/src/core/tests/)
+[![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](releases/v0.3.0.md)
+[![WCAG](https://img.shields.io/badge/WCAG-2.1%20compliant-green.svg)](#-whats-new-in-v030)
  [![Code Quality](https://img.shields.io/badge/code%20quality-production%20ready-brightgreen.svg)](#testing) [![Built with Free APIs](https://img.shields.io/badge/built%20with-free%20APIs-blueviolet.svg)](#creators-note) [![Contributions Welcome](https://img.shields.io/badge/Contributions-welcome-brightgreen.svg?style=flat)](CONTRIBUTING.md)
 [![GitHub Stars](https://img.shields.io/github/stars/vebgenofficial/vebgen?style=social)](https://github.com/vebgenofficial/vebgen/stargazers) [![GitHub Forks](https://img.shields.io/github/forks/vebgenofficial/vebgen?style=social)](https://github.com/vebgenofficial/vebgen/network/members)
 [![Twitter Follow](https://img.shields.io/twitter/follow/Vebgenofficial?style=social)](https://x.com/Vebgenofficial)
@@ -31,8 +33,8 @@
 
 ### 📊 Quick Stats
 
-📦 **800KB Code** • ✅ **309 Tests** • 📚 **850KB Docs**  
- **0 Vulnerabilities** • 💰 **$0 Spent** • ⏱️ **8 Months** • 🇮🇳 **Made in India**
+📦 **900KB Code** • ✅ **356 Tests** • 📚 **1,000KB Docs**  
+🎨 **WCAG 2.1 Built-In** • 💰 **$0 Spent** • ⏱️ **8 Months** • 🇮🇳 **Made in India**
 
 </div>
 
@@ -51,6 +53,20 @@ While tools like Cursor and GitHub Copilot help you *write* code faster, VebGen 
 >
 > *"Finally, an AI agent that doesn't break my code!"* - Beta Tester
 
+### **Major Additions**
+
+| Feature | What It Does | Impact |
+|---------|--------------|--------|
+| **🎨 Frontend Validation Suite** | 7 specialized parsers/analyzers enforce WCAG 2.1, detect render-blocking scripts, unused CSS, layout thrashing | ✅ Production-ready accessibility by default<br>✅ No manual Lighthouse audits needed<br>✅ 47 new frontend tests |
+| **📂 External Project Support** | Load ANY Django project—not just VebGen-created ones—and continue building | ✅ Adopt existing codebases<br>✅ Migrate from Cursor/Copilot mid-project<br>✅ Work on open source projects |
+| **🔧 Search/Replace Patching** | Surgical code edits with fuzzy matching (80%+ similarity) when strict patches fail | ✅ 70% → 92% patch success rate<br>✅ Fewer TARS remediation loops |
+| **🛡️ State Corruption Auto-Recovery** | 3-tier recovery (backups → rebuild from code) when project state is invalid | ✅ Never lose project history<br>✅ Automatic disk corruption handling |
+
+📖 **Full v0.3.0 Release Notes**: [releases/v0.3.0.md](releases/v0.3.0.md)  
+📖 **v0.2.0 Historical Release**: [releases/v0.2.0.md](releases/v0.2.0.md)
+
+---
+
 ### 🏆 World Firsts
 
 | Innovation | What It Means | Why It Matters |
@@ -59,6 +75,7 @@ While tools like Cursor and GitHub Copilot help you *write* code faster, VebGen 
 | **🔒 Built-In Sandbox Security** | Military-grade file system isolation and command whitelisting—no Docker required | ✅ Works natively on Windows/Mac/Linux<br>✅ Blocks path traversal, shell injection<br>✅ 50+ safe commands whitelisted |
 | **🔄 Dual-Agent Self-Remediation** | When tests fail, **Tars** analyzes the error and **Case** patches the bug—autonomously | ✅ Fixes 70% of errors without human input<br>✅ Learns from mistakes<br>✅ Up to 3 remediation strategies |
 | **💰 100% Free-Tier Built** | Entire 800KB codebase, 309 tests, 850KB docs built without spending $1 on APIs | ✅ Proves free-tier APIs (Gemini, OpenRouter) can build world-class software<br>✅ No venture capital required |
+| **🎨 Frontend Quality Enforcement (v0.3.0)** | Automated WCAG 2.1 + Lighthouse audits block feature completion until accessibility/performance issues are fixed | ✅ Production-ready UI by default<br>✅ No manual audits needed<br>✅ 12+ WCAG criteria covered |
 
 ---
 
@@ -73,6 +90,7 @@ While tools like GitHub Copilot and Cursor are amazing for helping you write cod
 | Feature | VebGen | Cursor | GitHub Copilot | Devin | AgentScript |
 |---------|--------|--------|---------------|-------|-------------|
 | **Code Intelligence** | ✅ AST-based (zero-token) | ❌ Full-file context | ❌ Full-file context | ⚠️ Cloud-based | ⚠️ Limited |
+| **Frontend Validation** | ✅ WCAG 2.1 + Lighthouse (built-in) | ❌ None | ❌ None | ⚠️ Manual audits | ❌ None |
 | **Sandbox Security** | ✅ Built-in (no Docker) | ❌ None | ❌ None | ✅ Cloud sandbox | ⚠️ AST interpreter only |
 | **Self-Remediation** | ✅ Dual-agent (Tars+Case) | ⚠️ Retry only | ❌ None | ✅ Single-agent | ❌ None |
 | **Full-App Generation** | ✅ Django, Flask, React | ❌ Code completion | ❌ Code completion | ✅ Full-stack | ⚠️ Limited |
@@ -183,6 +201,23 @@ When strict patching fails (LLM's line numbers are slightly off), VebGen:
 This **improved success rate from 70% → 92%** without compromising safety.
 
 📖 **Recovery Mechanisms**: See [File System Manager Documentation](docs/file_system_manager.md) for snapshot/rollback logic and [Workflow Manager Documentation](docs/workflow_manager.md) for remediation loops.
+
+### **🔧 Smart Code Patching (v0.3.0 Enhancement)**
+
+VebGen now uses a **5-layer matching strategy** for surgical code edits:
+
+| Layer | Strategy | When It Works | Success Rate |
+|-------|----------|---------------|--------------|
+| **1. Exact Match** | Character-perfect matching | Code unchanged since planning | 50-60% |
+| **2. Whitespace-Insensitive** | Ignores spaces/tabs/newlines | Formatting changes only | +15% |
+| **3. Indentation-Preserving** | Strips common indentation, preserves structure | Refactored indentation | +10% |
+| **4. Fuzzy Match (82%)** | difflib similarity matching | Minor code drift | +12% |
+| **5. Tree-Sitter (Phase 3)** | AST-aware semantic patching | Reserved for future | TBD |
+
+**v0.2.0 vs v0.3.0**:
+- v0.2.0: 2-layer (strict + fuzzy at 80%)
+- v0.3.0: 5-layer (search/replace format + raised fuzzy threshold to 82%)
+- **Result**: Patch success rate improved from 70% → 92% (+31%)
 
 ---
 
@@ -466,6 +501,18 @@ vebgen/
 │       │   ├── config_manager.py       # 📖 [Docs](docs/config_manager.md) - Plugin system
 │       │   ├── providers.json          # 📖 [Docs](docs/providers.md) - 120+ models config
 │       │   └── *_client.py             # 📖 [Docs](docs/llm_clients.md) - 5 LLM clients
+│       │   ├── parsers/                    # 📖 [Docs](docs/) - Frontend parsers (v0.3.0 🆕)
+│       │   │   ├── html_parser.py          # 📖 [Docs](docs/html_parser.md) - HTML validation
+│       │   │   ├── css_parser.py           # 📖 [Docs](docs/css_parser.md) - CSS validation
+│       │   │   └── vanilla_js_parser.py    # 📖 [Docs](docs/vanilla_js_parser.md) - JS validation
+│       │   │
+│       │   ├── analyzers/                  # 📖 [Docs](docs/analyzers.md) - Quality analyzers (v0.3.0 🆕)
+│       │   │   ├── accessibility_analyzer.py  # WCAG 2.1 compliance
+│       │   │   └── performance_analyzer.py    # Lighthouse-style audits
+│       │   │
+│       │   ├── validators/                 # 📖 [Docs](docs/) - Integrity checks (v0.3.0 🆕)
+│       │   │   ├── frontend_validator.py   # 📖 [Docs](docs/frontend_validator.md) - Orchestration
+│       │   │   └── js_html_validator.py    # 📖 [Docs](docs/js_html_validator.md) - Cross-file checks
 │       │
 │       ├── ui/                         # 📖 [Docs](docs/ui_components.md) - GUI components
 │       │   ├── main_window.py          # Main application window (CustomTkinter)
@@ -669,6 +716,14 @@ VebGen's architecture is fully documented with deep technical details. Each comp
 - **[Framework Prompts](docs/framework_prompts.md)** (166 KB) - Django expert prompts (166 KB), Flask/React placeholders
 - **[Adaptive Prompts](docs/adaptive_prompts.md)** (6 KB) - Workflow checklists for Django, Flask, Node.js
 
+### Frontend Validation (v0.3.0 🆕)
+- **[Frontend Validator](docs/frontend_validator.md)** (17 KB) - WCAG 2.1 orchestration, Lighthouse checks, issue aggregation
+- **[HTML Parser](docs/html_parser.md)** (14 KB) - Semantic structure, forms, CSRF tokens, accessibility
+- **[CSS Parser](docs/css_parser.md)** (15 KB) - Selectors, media queries, BEM validation, WCAG compliance
+- **[Vanilla JS Parser](docs/vanilla_js_parser.md)** (17 KB) - Functions, API calls, security issues (eval, XSS)
+- **[Analyzers (Accessibility + Performance)](docs/analyzers.md)** (11 KB) - WCAG mapping, render-blocking detection, dead CSS
+- **[JS-HTML Validator](docs/js_html_validator.md)** (15 KB) - Cross-file integrity (orphaned selectors, broken refs)
+
 ### UI Components
 - **[UI Components](docs/ui_components.md)** (27 KB) - UserActionDialog, ToolTip, MainWindow highlights
 
@@ -680,7 +735,16 @@ VebGen's architecture is fully documented with deep technical details. Each comp
 
 ## 🗺️ Roadmap
 
-### Version 0.2.0 (Next Release)
+### Version 0.3.0 (✅ Released - October 2024)
+- [x] **Frontend Validation Suite** - WCAG 2.1 + Lighthouse audits
+- [x] **External Project Loading** - Adopt ANY Django project
+- [x] **Search/Replace Patching** - 92% patch success rate
+- [x] **State Corruption Recovery** - 3-tier automatic restoration
+- [x] **47 New Tests** - Frontend quality assurance coverage
+
+📖 **Full Release Notes**: [releases/v0.3.0.md](releases/v0.3.0.md)
+
+### Version 0.4.0 (Next Release - Q1 2025)
 - [ ] Flask and FastAPI deep integration (views, blueprints, routes)
 - [ ] React/Vue frontend generation with API integration
 - [ ] Docker compose file generation
@@ -688,12 +752,6 @@ VebGen's architecture is fully documented with deep technical details. Each comp
 - [ ] Database migration conflict resolution
 - [ ] Multi-language support (TypeScript, Go)
 
-### Version 0.3.0
-- [ ] Visual workflow designer (drag-and-drop feature planning)
-- [ ] Real-time collaboration (multiple agents on same project)
-- [ ] Plugin system for custom agents
-- [ ] Cloud deployment automation (AWS, GCP, Heroku)
-- [ ] Performance profiling and optimization suggestions
 
 ### Long-term Vision
 - Self-improving agents (learn from user corrections)
@@ -898,6 +956,6 @@ If a solo developer in India can build this, **imagine what you can build** with
 
 **Made with ❤️ by [Ramesh Ravada](https://github.com/ramesh-ravada)**
 
-[🏠 Home](https://vebgen.dev) • [📚 Docs](docs/ARCHITECTURE.md) • [💬 Discord](https://discord.gg/K6ahYcTyca) • [🐦 Twitter](https://x.com/Vebgenofficial)
+[🏠 Home](https://github.com/vebgenofficial/vebgen) • [📚 Docs](ARCHITECTURE.md) • [💬 Discord](https://discord.gg/K6ahYcTyca) • [🐦 Twitter](https://x.com/Vebgenofficial)
 
 </div>

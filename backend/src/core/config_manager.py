@@ -1,4 +1,4 @@
-# src/core/config_manager.py
+# backend/src/core/config_manager.py
 import importlib
 import importlib.util
 import json
@@ -197,6 +197,82 @@ class ConfigManager:
              # Catch any other unexpected errors during the import process.
              logger.exception(f"Unexpected error loading prompts for framework '{framework}'.")
              raise RuntimeError(f"Failed to load prompts for framework '{framework}': {e}") from e
+
+    def _is_valid_framework_prompts(self, data: Any) -> bool:
+        """
+        Performs basic validation on the structure and content of the loaded prompts object.
+        Checks attributes of the FrameworkPrompts dataclass instance.
+        This ensures that the loaded prompts conform to the expected contract.
+
+        Args:
+            data: The loaded data object (expected to be an instance of FrameworkPrompts).
+
+        Returns:
+            True if the data is a valid FrameworkPrompts instance with correct structure, False otherwise.
+        """
+        # Check if it's an instance of the expected dataclass
+        if not isinstance(data, FrameworkPrompts):
+            logger.error(f"Validation failed: Prompts data is not an instance of FrameworkPrompts (type: {type(data)}).")
+            return False
+
+        # Define the required attribute names (lowercase) based on the FrameworkPrompts dataclass fields.
+        # Use dataclasses.fields to get the defined fields accurately.
+        required_attributes = {f.name for f in dataclasses.fields(FrameworkPrompts) if f.default is dataclasses.MISSING and f.default_factory is dataclasses.MISSING} # type: ignore
+
+
+        # Check if all required attributes are present on the instance.
+        missing_attributes = [attr for attr in required_attributes if not hasattr(data, attr) or getattr(data, attr) is None]
+        if missing_attributes:
+            # Log the missing ATTRIBUTES (lowercase)
+            logger.error(f"Validation failed: Prompts object missing required attributes: {missing_attributes}. Instance has: {vars(data).keys()}")
+            return False
+
+        # Check if the value associated with each required attribute is a dictionary (ChatMessage).
+        for attr_name in required_attributes:
+            prompt_value = getattr(data, attr_name)
+            if not isinstance(prompt_value, dict):
+                 logger.error(f"Validation failed: Prompt attribute '{attr_name}' value is not a dictionary (type: {type(prompt_value)}).")
+                 return False
+            # Further check if the dictionary has the required 'role' and 'content' keys of ChatMessage.
+            if not ('role' in prompt_value and 'content' in prompt_value):
+                 logger.error(f"Validation failed: Prompt attribute '{attr_name}' dictionary is missing 'role' or 'content'. Keys found: {list(prompt_value.keys())}")
+                 return False
+        return True
+
+    def _save_providers_config(self):
+        """Saves the current providers_config dictionary back to the providers.json file."""
+        try:
+            with open(self.providers_config_path, 'w', encoding='utf-8') as f:
+                json.dump(self.providers_config, f, indent=4)
+            logger.info(f"Provider configuration saved to {self.providers_config_path}")
+        except Exception as e:
+            logger.exception(f"Failed to save provider config to {self.providers_config_path}")
+            raise RuntimeError(f"Failed to save provider configuration: {e}") from e
+
+    def add_model_to_provider(self, provider_id: str, model_id: str):
+        """Adds a new model to a provider and saves the configuration."""
+        if provider_id in self.providers_config:
+            if model_id not in self.providers_config[provider_id]['models']:
+                self.providers_config[provider_id]['models'].append(model_id)
+                self.providers_config[provider_id]['models'].sort()
+                self._save_providers_config()
+                logger.info(f"Added model '{model_id}' to provider '{provider_id}'.")
+                return True
+        return False
+
+    def remove_model_from_provider(self, provider_id: str, model_id: str):
+        """Removes a model from a provider and saves the configuration."""
+        if provider_id in self.providers_config:
+            # For providers like OpenRouter, the model ID in the config might not have the prefix
+            prefix = self.providers_config[provider_id].get('client_config', {}).get('model_prefix', '')
+            model_id_to_remove = model_id.replace(prefix, '')
+
+            if model_id_to_remove in self.providers_config[provider_id]['models']:
+                self.providers_config[provider_id]['models'].remove(model_id_to_remove)
+                self._save_providers_config()
+                logger.info(f"Removed model '{model_id_to_remove}' from provider '{provider_id}'.")
+                return True
+        return False
 
     def _is_valid_framework_prompts(self, data: Any) -> bool:
         """
