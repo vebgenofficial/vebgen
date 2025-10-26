@@ -1055,6 +1055,13 @@ class CommandExecutor:
             raise ValueError(error_msg)
 
         main_command_raw = command_parts[0] # Keep this
+
+        # --- NEW: Strip surrounding quotes from the executable path ---
+        # shlex.split on Windows correctly keeps quotes around paths with spaces.
+        # However, subprocess.Popen on Windows fails with "Access is denied" if
+        # the executable path in the list still has those quotes. We must strip them.
+        command_parts[0] = command_parts[0].strip('"\'')
+
         args = command_parts[1:]
         command_key_to_check = self._get_base_command_key(main_command_raw)
 
