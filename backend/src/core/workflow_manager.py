@@ -1114,9 +1114,9 @@ class WorkflowManager:
                 self.progress_callback({"message": "Creating virtual environment..."})
                 # Use command_executor to run 'python -m venv venv'
                 # Determine the python executable to use (system python)
-                python_executable = sys.executable or "python" # Default to 'python' if sys.executable is None
-                # Construct the command string WITHOUT extra quotes around the executable
-                venv_command = f'{python_executable} -m venv venv'
+                python_executable = sys.executable or "python"
+                # Construct the command string WITH quotes around the executable to handle paths with spaces.
+                venv_command = f'"{python_executable}" -m venv venv'
                 # The complex remediation loop is overkill for these initial, reliable commands. We can execute them more directly.
                 setup_task_id = f"setup_{int(time.time())}"
                 logger.info(f"Requesting UI execution for command: `{venv_command}` (Task: {setup_task_id})")
