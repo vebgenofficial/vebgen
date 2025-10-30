@@ -901,6 +901,34 @@ Found a bug or have a feature request? We have dedicated templates to help:
 
 ---
 
+## 🤖 Development Transparency
+
+**VebGen is hand-engineered.** The AST parsing engine, dual-agent architecture, sandbox security, and all core algorithms were designed and implemented through 8 months of intensive development—no code generation, no AI assistance for logic.
+
+### AI Usage Disclosure
+
+AI tools (Claude, Gemini) were used **exclusively** for:
+
+- **Documentation Polish**: Refining README files, architecture docs, and user-facing guides for clarity and professionalism
+- **Code Comments**: Adding docstrings and inline comments to improve code readability and maintainability  
+
+
+### What AI Did NOT Do
+
+AI was **not** used to:
+- Design or implement the AST parsing system
+- Write the dual-agent TARS/CASE architecture
+- Develop the search/replace patching algorithm (70% → 92% success rate)
+- Build the sandbox security implementation
+- Create the frontend validation suite
+- Implement any business logic, algorithms, or core features
+
+**See for yourself**: Browse backend/src/core/ to see the hand-crafted AST parsing, dual-agent logic, and security implementations. These are complex, domain-specific patterns that demonstrate deep Python and Django expertise.
+
+VebGen demonstrates that world-class software emerges from technical depth, not team size or budget. Solo developers with domain expertise can build production-grade tools—no venture capital required, just focused engineering and 8 months of dedication.
+
+---
+
 ## 🌟 Star History
 
 If VebGen helps your workflow, consider starring the repo! It helps others discover the project.
