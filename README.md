@@ -33,8 +33,7 @@
 
 ### 📊 Quick Stats
 
-📦 **900KB Code** • ✅ **356 Tests** • 📚 **1,000KB Docs**  
-🎨 **WCAG 2.1 Built-In** • 💰 **$0 Spent** • ⏱️ **8 Months** • 🇮🇳 **Made in India**
+📦 **900KB Code** • ✅ **356 Tests** • 📚 **1,000KB Docs** • 🎨 **WCAG 2.1 Built-In** • 💰 **$0 Spent** • ⏱️ **8 Months** • 👥 **2-Person Team** • **Made in India** 🇮🇳
 
 </div>
 
@@ -74,7 +73,7 @@ While tools like Cursor and GitHub Copilot help you *write* code faster, VebGen 
 | **🧠 AST-Powered Code Intelligence** | Understands Django/Flask projects by parsing code structure (95+ constructs), not dumping files to LLM | ✅ 10x faster context building<br>✅ Zero wasted tokens<br>✅ Understands relationships between models, views, URLs |
 | **🔒 Built-In Sandbox Security** | Military-grade file system isolation and command whitelisting—no Docker required | ✅ Works natively on Windows/Mac/Linux<br>✅ Blocks path traversal, shell injection<br>✅ 50+ safe commands whitelisted |
 | **🔄 Dual-Agent Self-Remediation** | When tests fail, **Tars** analyzes the error and **Case** patches the bug—autonomously | ✅ Fixes 70% of errors without human input<br>✅ Learns from mistakes<br>✅ Up to 3 remediation strategies |
-| **💰 100% Free-Tier Built** | Entire 800KB codebase, 309 tests, 850KB docs built without spending $1 on APIs | ✅ Proves free-tier APIs (Gemini, OpenRouter) can build world-class software<br>✅ No venture capital required |
+| **💰 100% Free-Tier Built** | Entire 900KB codebase, 356 tests, 1,000KB docs built without spending $1 on APIs | ✅ Proves free-tier APIs (Gemini, OpenRouter) can build world-class software<br>✅ No venture capital required |
 | **🎨 Frontend Quality Enforcement (v0.3.0)** | Automated WCAG 2.1 + Lighthouse audits block feature completion until accessibility/performance issues are fixed | ✅ Production-ready UI by default<br>✅ No manual audits needed<br>✅ 12+ WCAG criteria covered |
 
 ---
@@ -582,7 +581,7 @@ Supported frameworks (auto-detected or manually specified):
 
 ## 🧪 Testing
 
-VebGen maintains **309 passing tests** with **99.7% success rate** in under 10 seconds.
+VebGen maintains **310 passing tests** with **99.7% success rate** in under 10 seconds.
 
 ```sh
 # Run all tests
@@ -856,7 +855,7 @@ VebGen introduces **three world-first innovations** in AI-powered development:
 - **850KB** of technical documentation
 - **95+** Django/Flask constructs parsed via AST
 - **50+** whitelisted safe commands
-- **8 months** of solo development
+- 8 months of development by **2-person team**
 - **$0** spent on APIs (built with free-tier Gemini + OpenRouter)
 - **0** security vulnerabilities (sandbox-first design)
 
@@ -903,7 +902,7 @@ Found a bug or have a feature request? We have dedicated templates to help:
 
 ## 🤖 Development Transparency
 
-**VebGen is hand-engineered.** The AST parsing engine, dual-agent architecture, sandbox security, and all core algorithms were designed and implemented through 8 months of intensive development—no code generation, no AI assistance for logic.
+**VebGen is hand-engineered by our small team.** The AST parsing engine, dual-agent architecture, sandbox security, and all core algorithms were designed and implemented through **8 months of intensive development**—no code generation, no AI assistance for logic.
 
 ### AI Usage Disclosure
 
@@ -929,6 +928,26 @@ VebGen demonstrates that world-class software emerges from technical depth, not 
 
 ---
 
+## 👥 The Team
+
+VebGen is built and maintained by two developers based in India:
+
+### **Ramesh Ravada** - Lead Architect & Developer
+- AST parsing engine design & implementation
+- Core backend development & Django/Flask integration
+- GitHub: [@vebgen](https://github.com/vebgenofficial)
+
+### **Md Rehan** - Co-Developer
+- Dual-agent architecture design & implementation (TARS + CASE)
+- Frontend validation suite (WCAG 2.1 + Lighthouse audits)
+- Lead on testing and quality assurance (356+ unit tests)
+
+**About Us:** Two friends who believe world-class software doesn't require venture capital—just technical depth and dedication. We prove that focused engineering beats large teams and big budgets.
+
+**Timeline:** 8 months development • $0 infrastructure cost • 900KB code • 356 tests • MIT licensed
+
+---
+
 ## 🌟 Star History
 
 If VebGen helps your workflow, consider starring the repo! It helps others discover the project.
@@ -937,7 +956,7 @@ If VebGen helps your workflow, consider starring the repo! It helps others disco
 
 ---
 
-## 👥 Contributors
+## 👥 Other Contributors
 
 VebGen is maintained by:
 
@@ -965,14 +984,14 @@ Currently seeking: $0/month (built with free-tier APIs forever!)
 
 ## 👨‍💻 Creator's Note
 
-VebGen was built entirely from scratch by a solo developer over **8 months** — without funding, sponsorship, or paid APIs.
+VebGen was built entirely from scratch by a duo of developers over **8 months** — without funding, sponsorship, or paid APIs.
 
 Every feature you see — from military-grade sandbox security to zero-token AST parsing — was engineered and tested using only **free-tier APIs** (Gemini 2.0 Flash, OpenRouter). The entire 800KB codebase, 309 unit tests, and 850KB of documentation were written without a single dollar spent.
 
 **Why does this matter?**  
 Because world-class software doesn't require venture capital. It requires **persistence, precision, and passion**.  
 
-If a solo developer in India can build this, **imagine what you can build** with VebGen.
+If a duo of developers in India can build this, **imagine what you can build** with VebGen.
 
 **Built with ❤️ in India** 🇮🇳
 
@@ -982,7 +1001,7 @@ If a solo developer in India can build this, **imagine what you can build** with
 
 <div align="center">
 
-**Made with ❤️ by [Ramesh Ravada](https://github.com/ramesh-ravada)**
+**Made with ❤️ by Ramesh Ravada and Md Rehan**
 
 [🏠 Home](https://github.com/vebgenofficial/vebgen) • [📚 Docs](ARCHITECTURE.md) • [💬 Discord](https://discord.gg/K6ahYcTyca) • [🐦 Twitter](https://x.com/Vebgenofficial)
 
